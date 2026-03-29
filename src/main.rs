@@ -6,23 +6,30 @@ mod mermaid;
 mod theme;
 mod viewer;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 
 /// Terminal file viewer with syntax highlighting, powered by libghostty-vt.
+///
+/// When invoked with no file argument, launches fzf as an interactive file
+/// picker with reed providing the preview. Select a file to open it in the
+/// full interactive viewer. Pipe a file list into stdin to narrow the
+/// candidates (e.g. `find . -name '*.rs' | reed`).
 #[derive(Parser)]
 #[command(name = "reed", version, about)]
 struct Cli {
-    /// File to display (markdown rendered richly; code files syntax-highlighted).
-    file: PathBuf,
+    /// File to display. If omitted, launches fzf for interactive file picking.
+    file: Option<PathBuf>,
 
     /// Maximum scrollback lines (default: 100 000).
     #[arg(long, default_value_t = 100_000)]
     max_scrollback: usize,
 
-    /// Print rendered markdown to stdout instead of launching the interactive viewer.
+    /// Print rendered output to stdout instead of launching the interactive viewer.
     #[arg(long)]
     print: bool,
 
@@ -50,23 +57,33 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let raw_content = std::fs::read_to_string(&cli.file)
-        .with_context(|| format!("failed to read {}", cli.file.display()))?;
+    // No file argument → launch fzf picker mode.
+    let file = match cli.file {
+        Some(f) => f,
+        None => {
+            if cli.preview || cli.print {
+                bail!("--preview and --print require a file argument");
+            }
+            return fzf_pick_and_view(cli.theme.as_deref(), cli.max_scrollback);
+        }
+    };
 
-    let is_markdown = highlight::is_markdown_path(&cli.file);
+    let raw_content = std::fs::read_to_string(&file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+
+    let is_markdown = highlight::is_markdown_path(&file);
     let code_lang = if is_markdown {
         None
     } else {
-        highlight::lang_for_path(&cli.file)
+        highlight::lang_for_path(&file)
     };
 
-    let filename = cli.file.display().to_string();
+    let filename = file.display().to_string();
 
     // Resolve the directory containing the file (for relative image paths).
-    let base_dir = cli
-        .file
+    let base_dir = file
         .canonicalize()
-        .unwrap_or_else(|_| cli.file.clone())
+        .unwrap_or_else(|_| file.clone())
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -103,5 +120,94 @@ fn main() -> Result<()> {
             cli.line,
             code_lang.as_deref(),
         )
+    }
+}
+
+// ── fzf picker mode ─────────────────────────────────────────────
+
+/// Launch fzf with reed as the preview command. When the user selects a
+/// file, open it in the interactive viewer.
+///
+/// If stdin is not a TTY (i.e. something is piped in), fzf reads its
+/// candidates from that pipe automatically. Otherwise fzf uses its
+/// default file finder.
+fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
+    // Resolve our own binary path so the preview command works regardless
+    // of how reed was invoked (cargo run, PATH, relative, etc.).
+    let reed_bin = std::env::current_exe().context("cannot determine reed binary path")?;
+
+    // Build the preview command that fzf will invoke for each candidate.
+    let mut preview_cmd = format!("{} --preview {{}}", shell_escape(&reed_bin));
+    if let Some(t) = theme {
+        preview_cmd.push_str(&format!(" --theme {t}"));
+    }
+
+    let mut fzf = Command::new("fzf");
+    fzf.arg("--preview").arg(&preview_cmd);
+    fzf.arg("--preview-window").arg("right:60%");
+
+    // If stdin is piped, fzf inherits it and reads candidates from there.
+    // If stdin is a TTY, fzf uses its built-in file finder.
+    if !std::io::stdin().is_terminal() {
+        fzf.stdin(std::process::Stdio::inherit());
+    }
+
+    // fzf needs the real TTY for its UI, and writes the selection to stdout.
+    let output = fzf
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("failed to launch fzf — is it installed? (brew install fzf)")?
+        .wait_with_output()
+        .context("fzf process failed")?;
+
+    if !output.status.success() {
+        // fzf exits 1 on Ctrl-C / Esc — not an error, just quit silently.
+        return Ok(());
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        return Ok(());
+    }
+
+    let file = PathBuf::from(&selected);
+    let raw_content = std::fs::read_to_string(&file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+
+    let is_markdown = highlight::is_markdown_path(&file);
+    let code_lang = if is_markdown {
+        None
+    } else {
+        highlight::lang_for_path(&file)
+    };
+
+    let filename = file.display().to_string();
+    let base_dir = file
+        .canonicalize()
+        .unwrap_or_else(|_| file.clone())
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    viewer::run(
+        &raw_content,
+        max_scrollback,
+        theme,
+        &filename,
+        &base_dir,
+        None,
+        code_lang.as_deref(),
+    )
+}
+
+/// Escape a path for use inside a shell command string.
+fn shell_escape(path: &Path) -> String {
+    let s = path.display().to_string();
+    if s.contains(' ') || s.contains('\'') || s.contains('"') || s.contains('\\') {
+        // Single-quote the path, escaping any embedded single quotes.
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        s
     }
 }

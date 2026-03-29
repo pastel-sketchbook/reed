@@ -156,7 +156,11 @@ pub fn mermaid_theme_for(bg: Color) -> &'static str {
         Color::Rgb { r, g, b } => {
             // Relative luminance approximation.
             let luminance = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
-            if luminance < 128.0 { "dark" } else { "default" }
+            if luminance < 128.0 {
+                "dark"
+            } else {
+                "default"
+            }
         }
         // Color::Reset means transparent / terminal default — assume dark.
         Color::Reset => "dark",

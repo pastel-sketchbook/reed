@@ -20,7 +20,7 @@ use crate::highlight;
 use crate::images::{self, ImagePlacement};
 use crate::input;
 use crate::mermaid;
-use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
+use crate::theme::{self, Theme, MIN_TERM_HEIGHT, MIN_TERM_WIDTH};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;

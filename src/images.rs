@@ -13,8 +13,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use image::GenericImageView;
 use regex::Regex;
 use tracing::{debug, warn};
