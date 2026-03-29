@@ -1,4 +1,5 @@
 mod config;
+mod highlight;
 mod images;
 mod input;
 mod mermaid;

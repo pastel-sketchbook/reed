@@ -16,10 +16,11 @@ use tracing::{debug, warn};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config;
+use crate::highlight;
 use crate::images::{self, ImagePlacement};
 use crate::input;
 use crate::mermaid;
-use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
+use crate::theme::{self, Theme, MIN_TERM_HEIGHT, MIN_TERM_WIDTH};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
@@ -96,7 +97,8 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
         .and_then(|v| v.parse::<usize>().ok());
 
     let skin = theme::build_skin(theme);
-    let joined = join_paragraphs(markdown);
+    let highlighted = highlight::highlight_code_blocks(markdown, theme.bg);
+    let joined = join_paragraphs(&highlighted);
     let rendered = skin.text(&joined, Some(width)).to_string();
 
     // Split into lines, optionally skip to start_line, optionally limit count.
@@ -226,13 +228,18 @@ pub fn run(
                 })
                 .collect();
 
+            // --- Syntax-highlight fenced code blocks ---
+            // Replace code block contents with ANSI-colored tokens from syntect.
+            // Must happen before build_processed_markdown so line counts match.
+            let highlighted_md = highlight::highlight_code_blocks(markdown, theme.bg);
+
             // --- Build unified replacement map ---
             // A "replacement" is a line range in the original markdown that
             // should be replaced with blank placeholder rows for an image.
             // Both `![alt](path)` images and successfully-rendered mermaid
             // blocks produce replacements.
             let (processed_md, all_placements) = build_processed_markdown(
-                markdown,
+                &highlighted_md,
                 &image_refs,
                 &mermaid_blocks,
                 &rendered_mermaids,
