@@ -82,7 +82,8 @@ pub fn lang_for_path(path: &std::path::Path) -> Option<String> {
 ///
 /// Used to route non-Markdown files through the normal rendering pipeline
 /// (termimad + syntect highlighting).
-pub fn wrap_in_code_fence(source: &str, lang: &str) -> String {
+#[cfg(test)]
+fn wrap_in_code_fence(source: &str, lang: &str) -> String {
     // Use a long fence to avoid conflicts with content.
     let mut out = String::with_capacity(source.len() + lang.len() + 16);
     out.push_str("```");
@@ -101,9 +102,9 @@ pub fn wrap_in_code_fence(source: &str, lang: &str) -> String {
 /// Highlight a code block using syntect.
 ///
 /// Returns the highlighted source as a string with ANSI foreground escape
-/// sequences (no background — termimad's `code_bg` provides that), or `None`
-/// if the language is not recognized by syntect.
-fn highlight_code(source: &str, lang: &str, bg: Color) -> Option<String> {
+/// sequences (no background), or `None` if the language is not recognized
+/// by syntect.
+pub fn highlight_code(source: &str, lang: &str, bg: Color) -> Option<String> {
     let ss = syntax_set();
     let ts = theme_set();
 

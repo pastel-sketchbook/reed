@@ -53,16 +53,11 @@ fn main() -> Result<()> {
     let raw_content = std::fs::read_to_string(&cli.file)
         .with_context(|| format!("failed to read {}", cli.file.display()))?;
 
-    // If the file is not markdown, wrap it in a fenced code block so the
-    // existing pipeline (termimad + syntect) renders it with syntax highlighting.
-    let markdown = if highlight::is_markdown_path(&cli.file) {
-        raw_content
-    } else if let Some(lang) = highlight::lang_for_path(&cli.file) {
-        highlight::wrap_in_code_fence(&raw_content, &lang)
+    let is_markdown = highlight::is_markdown_path(&cli.file);
+    let code_lang = if is_markdown {
+        None
     } else {
-        // Unknown extension — wrap in a bare fence (no highlighting, but
-        // still rendered as a code block with monospace font).
-        highlight::wrap_in_code_fence(&raw_content, "")
+        highlight::lang_for_path(&cli.file)
     };
 
     let filename = cli.file.display().to_string();
@@ -77,17 +72,36 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     if cli.print {
-        viewer::print_to_stdout(&markdown)
+        if is_markdown {
+            viewer::print_to_stdout(&raw_content)
+        } else {
+            viewer::preview_code(
+                &raw_content,
+                code_lang.as_deref(),
+                cli.theme.as_deref(),
+                None,
+            )
+        }
     } else if cli.preview {
-        viewer::preview(&markdown, cli.theme.as_deref(), cli.line)
+        if is_markdown {
+            viewer::preview(&raw_content, cli.theme.as_deref(), cli.line)
+        } else {
+            viewer::preview_code(
+                &raw_content,
+                code_lang.as_deref(),
+                cli.theme.as_deref(),
+                cli.line,
+            )
+        }
     } else {
         viewer::run(
-            &markdown,
+            &raw_content,
             cli.max_scrollback,
             cli.theme.as_deref(),
             &filename,
             &base_dir,
             cli.line,
+            code_lang.as_deref(),
         )
     }
 }

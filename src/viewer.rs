@@ -123,6 +123,52 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
     Ok(())
 }
 
+/// Preview mode for non-markdown code files: syntax-highlight with syntect
+/// and write directly to stdout, bypassing termimad entirely.
+///
+/// `lang` is the syntect language token (e.g. "rs", "py"). If `None` or
+/// unrecognized, the raw source is printed as-is.
+pub fn preview_code(
+    source: &str,
+    lang: Option<&str>,
+    theme_name: Option<&str>,
+    start_line: Option<usize>,
+) -> Result<()> {
+    let prefs = config::load_preferences();
+    let name = theme_name.unwrap_or(&prefs.theme);
+    let theme = &theme::THEMES[theme::theme_index_by_name(name)];
+
+    // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
+    let max_lines = std::env::var("FZF_PREVIEW_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+
+    // Attempt syntax highlighting; fall back to raw source.
+    let highlighted = lang
+        .and_then(|l| highlight::highlight_code(source, l, theme.bg))
+        .unwrap_or_else(|| source.to_string());
+
+    let lines: Vec<&str> = highlighted.lines().collect();
+    let skip = start_line.unwrap_or(1).saturating_sub(1);
+    let iter = lines.iter().skip(skip);
+
+    let mut stdout = io::stdout().lock();
+    match max_lines {
+        Some(limit) => {
+            for line in iter.take(limit) {
+                writeln!(stdout, "{line}")?;
+            }
+        }
+        None => {
+            for line in iter {
+                writeln!(stdout, "{line}")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// What caused the inner render loop to exit.
 enum LoopExit {
     Quit,
@@ -136,6 +182,10 @@ enum LoopExit {
 
 /// Run the interactive markdown viewer loop.
 /// Falls back to print mode if no TTY is available.
+///
+/// When `code_lang` is `Some`, the content is treated as a code file: it is
+/// syntax-highlighted with syntect and fed directly to the VT terminal,
+/// bypassing termimad. When `None`, the standard markdown pipeline is used.
 pub fn run(
     markdown: &str,
     max_scrollback: usize,
@@ -143,6 +193,7 @@ pub fn run(
     filename: &str,
     base_dir: &Path,
     initial_line: Option<usize>,
+    code_lang: Option<&str>,
 ) -> Result<()> {
     if !io::stdout().is_terminal() {
         return print_to_stdout(markdown);
@@ -228,41 +279,37 @@ pub fn run(
                 })
                 .collect();
 
-            // --- Syntax-highlight fenced code blocks ---
-            // Replace code block contents with ANSI-colored tokens from syntect.
-            // Must happen before build_processed_markdown so line counts match.
-            let highlighted_md = highlight::highlight_code_blocks(markdown, theme.bg);
+            // --- Render content to ANSI text ---
+            let (ansi_text, all_placements) = if let Some(lang) = code_lang {
+                // Code file path: syntect → VT terminal (no termimad).
+                let highlighted = highlight::highlight_code(markdown, lang, theme.bg)
+                    .unwrap_or_else(|| markdown.to_string());
+                let ansi = highlighted.replace('\n', "\r\n");
+                (ansi, Vec::new())
+            } else {
+                // Markdown path: syntect (inside fences) → termimad → VT.
 
-            // --- Build unified replacement map ---
-            // A "replacement" is a line range in the original markdown that
-            // should be replaced with blank placeholder rows for an image.
-            // Both `![alt](path)` images and successfully-rendered mermaid
-            // blocks produce replacements.
-            let (processed_md, all_placements) = build_processed_markdown(
-                &highlighted_md,
-                &image_refs,
-                &mermaid_blocks,
-                &rendered_mermaids,
-                inner_cols,
-                cell_w,
-                cell_h,
-            );
+                // --- Syntax-highlight fenced code blocks ---
+                let highlighted_md = highlight::highlight_code_blocks(markdown, theme.bg);
 
-            // Build themed skin and render markdown → ANSI.
-            let skin = theme::build_skin(theme);
-            let joined = join_paragraphs(&processed_md);
-            let ansi_text = skin.text(&joined, Some(inner_cols as usize)).to_string();
+                // --- Build unified replacement map ---
+                let (processed_md, placements) = build_processed_markdown(
+                    &highlighted_md,
+                    &image_refs,
+                    &mermaid_blocks,
+                    &rendered_mermaids,
+                    inner_cols,
+                    cell_w,
+                    cell_h,
+                );
 
-            // termimad uses bare \n for line breaks, but the VT terminal
-            // follows strict VT semantics where LF only moves down — it
-            // does NOT return to column 0. Convert to \r\n so each line
-            // starts at the left edge.
-            let ansi_text = ansi_text.replace('\n', "\r\n");
-
-            // termimad may emit a leading blank line before the first heading
-            // (ANSI escape codes followed by \r\n with no printable text).
-            // Strip it so content starts immediately below the header bar.
-            let ansi_text = strip_leading_blank_lines(&ansi_text);
+                let skin = theme::build_skin(theme);
+                let joined = join_paragraphs(&processed_md);
+                let rendered = skin.text(&joined, Some(inner_cols as usize)).to_string();
+                let ansi = rendered.replace('\n', "\r\n");
+                let ansi = strip_leading_blank_lines(&ansi).to_string();
+                (ansi, placements)
+            };
 
             // Create the virtual terminal and feed rendered content.
             let mut term = Terminal::new(TerminalOptions {
