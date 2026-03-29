@@ -1,7 +1,7 @@
 //! User configuration persistence.
 //!
 //! Preferences (theme name) are stored as TOML in the OS config directory
-//! (`~/.config/md-ghostty/preferences.toml` on Linux/macOS).
+//! (`~/.config/reed/preferences.toml` on Linux/macOS).
 
 use std::fs;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::theme;
 
 /// Application name used for directory paths.
-const APP_NAME: &str = "md-ghostty";
+const APP_NAME: &str = "reed";
 
 /// Persistent user preferences (TOML).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,7 +31,7 @@ impl Default for Preferences {
 
 /// Resolve the preferences file path.
 ///
-/// Returns `~/.config/md-ghostty/preferences.toml` (or OS equivalent).
+/// Returns `~/.config/reed/preferences.toml` (or OS equivalent).
 #[must_use]
 pub fn preferences_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", APP_NAME)

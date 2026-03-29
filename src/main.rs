@@ -10,7 +10,7 @@ use clap::Parser;
 
 /// Terminal markdown viewer powered by libghostty-vt.
 #[derive(Parser)]
-#[command(name = "md-ghostty", version, about)]
+#[command(name = "reed", version, about)]
 struct Cli {
     /// Markdown file to display.
     file: PathBuf,

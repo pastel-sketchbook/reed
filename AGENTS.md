@@ -1,10 +1,10 @@
 ---
-description: Rust project conventions for md-ghostty.
+description: Rust project conventions for reed.
 globs: "*.rs, Cargo.toml, Cargo.lock"
 alwaysApply: true
 ---
 
-# Rust — md-ghostty
+# Rust — reed
 
 Production-grade terminal markdown viewer powered by libghostty-vt.
 This is a Rust 2024-edition project. Use `cargo` for all build/test/run tasks.

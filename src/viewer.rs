@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config;
 use crate::input;
-use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
+use crate::theme::{self, Theme, MIN_TERM_HEIGHT, MIN_TERM_WIDTH};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
@@ -318,9 +318,9 @@ fn draw_header(stdout: &mut io::Stdout, cols: u16, theme: &Theme, filename: &str
         SetBackgroundColor(theme.header_bg),
     )?;
 
-    // Left: padding + "MD-GHOSTTY" title + version + separator + filename.
+    // Left: padding + "REED" title + version + separator + filename.
     let pad = " ".repeat(SIDE_PAD as usize);
-    let title = "MD-GHOSTTY";
+    let title = "REED";
     queue!(
         stdout,
         Print(&pad),

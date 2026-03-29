@@ -1,8 +1,8 @@
 [package]
-name = "md-ghostty"
+name = "reed"
 version = "0.1.0"
 edition = "2024"
-description = "Production-grade terminal markdown viewer powered by libghostty-vt"
+description = "Terminal markdown viewer powered by libghostty-vt"
 license = "MIT"
 
 [dependencies]

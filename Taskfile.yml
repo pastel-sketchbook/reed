@@ -1,6 +1,6 @@
 version: "3"
 env:
-  PGM_NAME: md-ghostty
+  PGM_NAME: reed
 tasks:
   default:
     desc: Show available tasks
