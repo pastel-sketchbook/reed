@@ -1,0 +1,139 @@
+version: "3"
+env:
+  PGM_NAME: md-ghostty
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  fmt:
+    desc: Format code
+    cmds:
+      - cargo fmt
+
+  check:
+    desc: Type-check without building
+    cmds:
+      - cargo check
+
+  clippy:
+    desc: Run clippy lints
+    cmds:
+      - cargo clippy -- -D warnings
+
+  typos:
+    desc: Check for typos in source and docs
+    cmds:
+      - typos
+
+  check:all:
+    desc: Run typos, format check, clippy lints, and tests
+    cmds:
+      - typos
+      - cargo fmt --check
+      - cargo clippy -- -D warnings
+      - cargo test
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - cargo test
+
+  build:
+    desc: Format and build release binary
+    cmds:
+      - cargo fmt
+      - cargo build --release
+
+  dev:
+    desc: Build debug binary
+    cmds:
+      - cargo build
+
+  run:
+    desc: View a markdown file (pass file path via CLI_ARGS)
+    deps: [dev]
+    vars:
+      LIB_PATH:
+        sh: dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" 2>/dev/null | head -1) 2>/dev/null || echo "."
+    cmds:
+      - DYLD_LIBRARY_PATH={{.LIB_PATH}} LD_LIBRARY_PATH={{.LIB_PATH}} target/debug/$PGM_NAME {{.CLI_ARGS}}
+
+  install:
+    desc: Build release and copy to ~/bin
+    deps: [build]
+    cmds:
+      - cp target/release/$PGM_NAME ~/bin
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - cargo clean
+
+  loc:
+    desc: Count lines of code
+    cmds:
+      - tokei
+
+  loc:files:
+    desc: Lines of code per source file
+    cmds:
+      - tokei src/ --files
+
+  version:patch:
+    desc: Bump patch version (0.0.x)
+    vars:
+      CURRENT:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'
+      MAJOR:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | cut -d. -f1
+      MINOR:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | cut -d. -f2
+      PATCH:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | cut -d. -f3
+    cmds:
+      - |
+        NEW="{{.MAJOR}}.{{.MINOR}}.$(({{.PATCH}} + 1))"
+        sed -i "s/^version = \"{{.CURRENT}}\"/version = \"$NEW\"/" Cargo.toml
+        cargo generate-lockfile
+        echo "Bumped {{.CURRENT}} → $NEW"
+
+  version:minor:
+    desc: Bump minor version (0.x.0)
+    vars:
+      CURRENT:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'
+      MAJOR:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | cut -d. -f1
+      MINOR:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | cut -d. -f2
+    cmds:
+      - |
+        NEW="{{.MAJOR}}.$(({{.MINOR}} + 1)).0"
+        sed -i "s/^version = \"{{.CURRENT}}\"/version = \"$NEW\"/" Cargo.toml
+        cargo generate-lockfile
+        echo "Bumped {{.CURRENT}} → $NEW"
+
+  version:major:
+    desc: Bump major version (x.0.0)
+    vars:
+      CURRENT:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'
+      MAJOR:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | cut -d. -f1
+    cmds:
+      - |
+        NEW="$(({{.MAJOR}} + 1)).0.0"
+        sed -i "s/^version = \"{{.CURRENT}}\"/version = \"$NEW\"/" Cargo.toml
+        cargo generate-lockfile
+        echo "Bumped {{.CURRENT}} → $NEW"
+
+  version:tag:
+    desc: Create git tag from current version
+    vars:
+      VERSION:
+        sh: grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'
+    cmds:
+      - git tag -a "v{{.VERSION}}" -m "v{{.VERSION}}"
+      - echo "Tagged v{{.VERSION}}"

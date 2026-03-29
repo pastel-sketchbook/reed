@@ -1,0 +1,15 @@
+[package]
+name = "md-ghostty"
+version = "0.1.0"
+edition = "2024"
+description = "Production-grade terminal markdown viewer powered by libghostty-vt"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs" }
+termimad = "0.34"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
