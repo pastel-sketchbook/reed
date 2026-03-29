@@ -41,8 +41,7 @@ fn default_theme_name() -> &'static str {
         return theme::THEMES
             .iter()
             .find(|t| t.name == "FFE Dark")
-            .map(|t| t.name)
-            .unwrap_or(theme::THEMES[0].name);
+            .map_or(theme::THEMES[0].name, |t| t.name);
     }
     theme::THEMES[0].name
 }

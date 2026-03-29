@@ -100,8 +100,7 @@ pub fn extract_mermaid_blocks(markdown: &str) -> Vec<MermaidBlock> {
             && trimmed
                 .strip_prefix("```mermaid")
                 .or_else(|| trimmed.strip_prefix("~~~mermaid"))
-                .map(|rest| rest.is_empty() || rest.starts_with(' '))
-                .unwrap_or(false)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         {
             let fence_char = if trimmed.starts_with("```") {
                 "```"
@@ -118,8 +117,7 @@ pub fn extract_mermaid_blocks(markdown: &str) -> Vec<MermaidBlock> {
                 if line_trimmed.starts_with(fence_char)
                     && line_trimmed
                         .strip_prefix(fence_char)
-                        .map(|rest| rest.trim().is_empty())
-                        .unwrap_or(false)
+                        .is_some_and(|rest| rest.trim().is_empty())
                 {
                     // Found closing fence.
                     blocks.push(MermaidBlock {
@@ -155,12 +153,11 @@ pub fn mermaid_theme_for(bg: Color) -> &'static str {
     match bg {
         Color::Rgb { r, g, b } => {
             // Relative luminance approximation.
-            let luminance = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
+            let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
             if luminance < 128.0 { "dark" } else { "default" }
         }
         // Color::Reset means transparent / terminal default — assume dark.
-        Color::Reset => "dark",
-        // For named colors, assume dark terminal.
+        // For named colors, also assume dark terminal.
         _ => "dark",
     }
 }
@@ -253,7 +250,7 @@ pub fn render_to_png(source: &str, bg_color: Color) -> Option<Vec<u8>> {
 fn simple_hash(s: &str) -> u64 {
     let mut hash: u64 = 5381;
     for byte in s.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+        hash = hash.wrapping_mul(33).wrapping_add(u64::from(byte));
     }
     hash
 }

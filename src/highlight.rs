@@ -13,15 +13,34 @@ use std::sync::OnceLock;
 use crossterm::style::Color;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxDefinition, SyntaxSet, SyntaxSetBuilder};
 use syntect::util::as_24_bit_terminal_escaped;
-use tracing::debug;
+use tracing::{debug, warn};
+
+// ── Bundled syntax definitions ───────────────────────────────────
+
+/// Zig `.sublime-syntax` bundled from ziglang/sublime-zig-language (MIT).
+const ZIG_SYNTAX: &str = include_str!("../syntaxes/Zig.sublime-syntax");
 
 // ── Lazy-loaded syntect resources ────────────────────────────────
 
-fn syntax_set() -> &'static SyntaxSet {
+/// Default syntaxes shipped with syntect.
+fn default_syntax_set() -> &'static SyntaxSet {
     static SS: OnceLock<SyntaxSet> = OnceLock::new();
     SS.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+/// Additional syntaxes bundled with reed (Zig, etc.).
+fn custom_syntax_set() -> &'static SyntaxSet {
+    static SS: OnceLock<SyntaxSet> = OnceLock::new();
+    SS.get_or_init(|| {
+        let mut builder = SyntaxSetBuilder::new();
+        match SyntaxDefinition::load_from_str(ZIG_SYNTAX, true, Some("syntaxes")) {
+            Ok(zig) => builder.add(zig),
+            Err(e) => warn!("failed to load bundled Zig syntax: {e}"),
+        }
+        builder.build()
+    })
 }
 
 fn theme_set() -> &'static ThemeSet {
@@ -35,7 +54,7 @@ fn theme_set() -> &'static ThemeSet {
 fn is_light_bg(color: Color) -> bool {
     match color {
         Color::Rgb { r, g, b } => {
-            let luminance = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
+            let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
             luminance > 128.0
         }
         // Color::Reset = transparent / terminal default — assume dark.
@@ -67,14 +86,17 @@ pub fn is_markdown_path(path: &std::path::Path) -> bool {
 /// Derive a language tag from a file path's extension.
 ///
 /// Returns `Some("rs")` for `foo.rs`, `None` for files without an extension
-/// or whose extension isn't recognized by syntect's default syntax set.
-/// The returned tag is suitable for use with `highlight_code()` (syntect
-/// resolves it via `find_syntax_by_extension`).
+/// or whose extension isn't recognized by syntect. Checks both the default
+/// syntax set and reed's bundled custom syntaxes (e.g. Zig).
+/// The returned tag is suitable for use with `highlight_code()`.
 pub fn lang_for_path(path: &std::path::Path) -> Option<String> {
     let ext = path.extension()?.to_str()?;
-    let ss = syntax_set();
-    // Validate that syntect actually knows this extension.
-    ss.find_syntax_by_extension(ext)?;
+    // Validate that at least one syntax set knows this extension.
+    if default_syntax_set().find_syntax_by_extension(ext).is_none()
+        && custom_syntax_set().find_syntax_by_extension(ext).is_none()
+    {
+        return None;
+    }
     Some(ext.to_lowercase())
 }
 
@@ -103,15 +125,12 @@ fn wrap_in_code_fence(source: &str, lang: &str) -> String {
 ///
 /// Returns the highlighted source as a string with ANSI foreground escape
 /// sequences (no background), or `None` if the language is not recognized
-/// by syntect.
+/// by syntect. Searches both default and custom (bundled) syntax sets.
 pub fn highlight_code(source: &str, lang: &str, bg: Color) -> Option<String> {
-    let ss = syntax_set();
     let ts = theme_set();
 
-    // Try token name first ("rust", "python"), then file extension ("rs", "py").
-    let syntax = ss
-        .find_syntax_by_token(lang)
-        .or_else(|| ss.find_syntax_by_extension(lang))?;
+    // Try default syntaxes first, then custom bundled ones.
+    let (syntax, ss) = find_syntax(lang)?;
 
     let theme_name = syntect_theme_name(bg);
     let theme = ts.themes.get(theme_name)?;
@@ -132,6 +151,35 @@ pub fn highlight_code(source: &str, lang: &str, bg: Color) -> Option<String> {
     }
 
     Some(output)
+}
+
+/// Look up a syntax by token name or extension across both syntax sets.
+///
+/// Returns a reference to the matched `SyntaxReference` and the `SyntaxSet`
+/// it belongs to (needed for `HighlightLines`).
+fn find_syntax(
+    lang: &str,
+) -> Option<(
+    &'static syntect::parsing::SyntaxReference,
+    &'static SyntaxSet,
+)> {
+    let defaults = default_syntax_set();
+    if let Some(s) = defaults
+        .find_syntax_by_token(lang)
+        .or_else(|| defaults.find_syntax_by_extension(lang))
+    {
+        return Some((s, defaults));
+    }
+
+    let custom = custom_syntax_set();
+    if let Some(s) = custom
+        .find_syntax_by_token(lang)
+        .or_else(|| custom.find_syntax_by_extension(lang))
+    {
+        return Some((s, custom));
+    }
+
+    None
 }
 
 // ── Markdown-level replacement ───────────────────────────────────
@@ -156,7 +204,7 @@ fn extract_fence_lang(trimmed: &str) -> Option<String> {
     }
 }
 
-/// Check if a trimmed line is a closing code fence (``` or ~~~ with no lang tag).
+/// Check if a trimmed line is a closing code fence (triple backticks or tildes with no lang tag).
 fn is_closing_fence(trimmed: &str, fence_char: char) -> bool {
     let prefix: String = std::iter::repeat_n(fence_char, 3).collect();
     trimmed.starts_with(&prefix) && trimmed.trim_start_matches(fence_char).trim().is_empty()
@@ -430,6 +478,19 @@ def bar():
     }
 
     #[test]
+    fn lang_for_path_zig_extensions() {
+        use std::path::Path;
+        assert_eq!(
+            lang_for_path(Path::new("build.zig")),
+            Some("zig".to_string())
+        );
+        assert_eq!(
+            lang_for_path(Path::new("build.zig.zon")),
+            Some("zon".to_string())
+        );
+    }
+
+    #[test]
     fn lang_for_path_unknown_extension() {
         use std::path::Path;
         // .xyzlang should not be recognized by syntect.
@@ -457,5 +518,59 @@ def bar():
         let src = "some content\n";
         let wrapped = wrap_in_code_fence(src, "");
         assert_eq!(wrapped, "```\nsome content\n```\n");
+    }
+
+    #[test]
+    fn highlight_zig_code() {
+        let src = "const std = @import(\"std\");\n\npub fn main() !void {\n    std.debug.print(\"hello\\n\", .{});\n}\n";
+        let dark_bg = Color::Rgb {
+            r: 30,
+            g: 30,
+            b: 30,
+        };
+        let result = highlight_code(src, "zig", dark_bg);
+        assert!(result.is_some(), "Zig should be recognized");
+        let highlighted = result.unwrap();
+        assert!(
+            highlighted.contains("\x1b["),
+            "output should contain ANSI escapes"
+        );
+    }
+
+    #[test]
+    fn highlight_zig_fenced_block() {
+        let md = "# Zig Example\n\n```zig\nconst x: u32 = 42;\n```\n";
+        let dark_bg = Color::Rgb {
+            r: 30,
+            g: 30,
+            b: 30,
+        };
+        let result = highlight_code_blocks(md, dark_bg);
+        assert!(result.contains("```zig"), "fence should be preserved");
+        // Code content should have ANSI escapes.
+        let code_section: String = result
+            .lines()
+            .skip_while(|l| !l.contains("```zig"))
+            .skip(1)
+            .take_while(|l| !l.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code_section.contains("\x1b["),
+            "zig code block should be highlighted"
+        );
+    }
+
+    #[test]
+    fn highlight_zon_code() {
+        let src = ".{\n    .name = \"my-project\",\n    .version = \"0.1.0\",\n}\n";
+        let result = highlight_code(src, "zon", Color::Reset);
+        assert!(result.is_some(), "zon should be recognized via Zig syntax");
+    }
+
+    #[test]
+    fn find_syntax_resolves_zig() {
+        let result = find_syntax("zig");
+        assert!(result.is_some(), "zig should resolve in custom syntax set");
     }
 }

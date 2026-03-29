@@ -1,8 +1,9 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::{cursor, execute, terminal};
 use libghostty_vt::terminal::ScrollViewport;
@@ -40,6 +41,7 @@ pub fn extract_headings(markdown: &str) -> Vec<Heading> {
         if let Some(rest) = trimmed.strip_prefix('#') {
             // Count the heading level.
             let hashes = 1 + rest.len() - rest.trim_start_matches('#').len();
+            #[allow(clippy::cast_possible_truncation)]
             let level = (hashes as u8).min(6);
             let text_part = rest.trim_start_matches('#');
 
@@ -66,6 +68,7 @@ pub fn extract_headings(markdown: &str) -> Vec<Heading> {
 /// used for page-up/down calculations.
 ///
 /// `headings` are pre-extracted from the markdown for fzf heading navigation.
+#[allow(clippy::cast_possible_wrap)]
 pub fn poll<'a>(
     term: &mut Terminal<'a, 'a>,
     _render: &mut RenderState<'a>,
@@ -79,8 +82,8 @@ pub fn poll<'a>(
     match event::read()? {
         Event::Key(key) => match (key.code, key.modifiers) {
             // Quit
-            (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return Ok(Action::Quit),
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Action::Quit),
+            (KeyCode::Char('q') | KeyCode::Esc, _)
+            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Action::Quit),
 
             // Theme cycling
             (KeyCode::Char('t'), KeyModifiers::NONE) => return Ok(Action::NextTheme),
@@ -104,8 +107,9 @@ pub fn poll<'a>(
                 term.scroll_viewport(ScrollViewport::Delta(-1));
             }
 
-            // Page down
-            (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+            // Page down (Space also pages down, like less/man)
+            (KeyCode::PageDown | KeyCode::Char(' '), _)
+            | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                 term.scroll_viewport(ScrollViewport::Delta(content_rows as isize));
             }
 
@@ -123,16 +127,11 @@ pub fn poll<'a>(
             }
 
             // Top / bottom
-            (KeyCode::Char('g'), _) | (KeyCode::Home, _) => {
+            (KeyCode::Char('g') | KeyCode::Home, _) => {
                 term.scroll_viewport(ScrollViewport::Top);
             }
-            (KeyCode::Char('G'), _) | (KeyCode::End, _) => {
+            (KeyCode::Char('G') | KeyCode::End, _) => {
                 term.scroll_viewport(ScrollViewport::Bottom);
-            }
-
-            // Space = page down (like less/man)
-            (KeyCode::Char(' '), _) => {
-                term.scroll_viewport(ScrollViewport::Delta(content_rows as isize));
             }
 
             _ => {}
@@ -175,7 +174,7 @@ fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
     let mut input = String::new();
     for h in headings {
         let indent = "  ".repeat((h.level as usize).saturating_sub(1));
-        input.push_str(&format!("{}:{}{}\n", h.line, indent, h.text));
+        let _ = writeln!(input, "{}:{indent}{}", h.line, h.text);
     }
 
     // Temporarily leave alternate screen so fzf can render.
@@ -199,7 +198,8 @@ fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // fzf draws its UI on stderr
-            .spawn()?;
+            .spawn()
+            .context("failed to launch fzf for heading picker")?;
 
         // Write headings to fzf's stdin.
         if let Some(mut stdin) = child.stdin.take() {

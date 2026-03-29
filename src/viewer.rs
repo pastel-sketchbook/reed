@@ -1,3 +1,4 @@
+use std::fmt::Write as FmtWrite;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
@@ -20,7 +21,7 @@ use crate::highlight;
 use crate::images::{self, ImagePlacement};
 use crate::input;
 use crate::mermaid;
-use crate::theme::{self, Theme, MIN_TERM_HEIGHT, MIN_TERM_WIDTH};
+use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
@@ -52,7 +53,7 @@ fn ansi_fg(color: Color) -> String {
     }
 }
 
-/// Build the ANSI-styled header line for the fzf picker, showing keyboard
+/// Build the ANSI-styled header line for the `fzf` picker, showing keyboard
 /// shortcuts and the current theme name. Used by `--header` / `transform-header`.
 pub fn fzf_header_line(theme: &Theme) -> String {
     let fg = ansi_fg(theme.fg);
@@ -65,8 +66,8 @@ pub fn fzf_header_line(theme: &Theme) -> String {
         "{accent}{ANSI_BOLD}^n/^b{ANSI_NORMAL} {fg}Theme {muted}{sep}\
          {accent}{ANSI_BOLD} ^/{ANSI_NORMAL} {fg}Layout {muted}{sep}\
          {accent}{ANSI_BOLD} enter{ANSI_NORMAL} {fg}Open\
-         {heading}  [{theme_name}]{ANSI_RESET}",
-        theme_name = theme.name,
+         {heading}  [{}]{ANSI_RESET}",
+        theme.name,
     )
 }
 
@@ -110,16 +111,15 @@ fn kitty_graphics_supported() -> bool {
 }
 
 /// Print rendered markdown to stdout (non-interactive, no TTY required).
-pub fn print_to_stdout(markdown: &str) -> Result<()> {
+pub fn print_to_stdout(markdown: &str) {
     let skin = MadSkin::default();
-    let width = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+    let width = terminal::size().map(|(c, _)| usize::from(c)).unwrap_or(80);
     let joined = join_paragraphs(markdown);
     let rendered = skin.text(&joined, Some(width));
     print!("{rendered}");
-    Ok(())
 }
 
-/// Preview mode: themed ANSI output to stdout for fzf --preview and piping.
+/// Preview mode: themed ANSI output to stdout for `fzf` `--preview` and piping.
 ///
 /// Respects `FZF_PREVIEW_COLUMNS` / `FZF_PREVIEW_LINES` for width/height.
 /// When `start_line` is set, output begins at that 1-indexed line.
@@ -133,7 +133,7 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
     let width = std::env::var("FZF_PREVIEW_COLUMNS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .or_else(|| terminal::size().ok().map(|(c, _)| c as usize))
+        .or_else(|| terminal::size().ok().map(|(c, _)| usize::from(c)))
         .unwrap_or(80);
 
     // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
@@ -148,8 +148,8 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
 
     // Split into lines, optionally skip to start_line, optionally limit count.
     let lines: Vec<&str> = rendered.lines().collect();
-    let skip = start_line.unwrap_or(1).saturating_sub(1);
-    let iter = lines.iter().skip(skip);
+    let start_offset = start_line.unwrap_or(1).saturating_sub(1);
+    let iter = lines.iter().skip(start_offset);
 
     let mut stdout = io::stdout().lock();
     match max_lines {
@@ -168,10 +168,10 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
     Ok(())
 }
 
-/// Preview mode for non-markdown code files: syntax-highlight with syntect
-/// and write directly to stdout, bypassing termimad entirely.
+/// Preview mode for non-markdown code files: syntax-highlight with `syntect`
+/// and write directly to stdout, bypassing `termimad` entirely.
 ///
-/// `lang` is the syntect language token (e.g. "rs", "py"). If `None` or
+/// `lang` is the `syntect` language token (e.g. "rs", "py"). If `None` or
 /// unrecognized, the raw source is printed as-is.
 pub fn preview_code(
     source: &str,
@@ -197,8 +197,8 @@ pub fn preview_code(
     let bg = ansi_bg(theme.bg);
 
     let lines: Vec<&str> = highlighted.lines().collect();
-    let skip = start_line.unwrap_or(1).saturating_sub(1);
-    let iter = lines.iter().skip(skip);
+    let start_offset = start_line.unwrap_or(1).saturating_sub(1);
+    let iter = lines.iter().skip(start_offset);
 
     let mut stdout = io::stdout().lock();
     let write_line = |stdout: &mut io::StdoutLock<'_>, line: &str| -> Result<()> {
@@ -228,7 +228,7 @@ enum LoopExit {
     PrevTheme,
     /// Terminal was resized — must re-create VT with new dimensions.
     Resize(u16, u16),
-    /// Jump to a specific line (from fzf heading navigation).
+    /// Jump to a specific line (from `fzf` heading navigation).
     GotoLine(usize),
 }
 
@@ -236,8 +236,9 @@ enum LoopExit {
 /// Falls back to print mode if no TTY is available.
 ///
 /// When `code_lang` is `Some`, the content is treated as a code file: it is
-/// syntax-highlighted with syntect and fed directly to the VT terminal,
-/// bypassing termimad. When `None`, the standard markdown pipeline is used.
+/// syntax-highlighted with `syntect` and fed directly to the VT terminal,
+/// bypassing `termimad`. When `None`, the standard markdown pipeline is used.
+#[allow(clippy::too_many_lines)]
 pub fn run(
     markdown: &str,
     max_scrollback: usize,
@@ -248,12 +249,14 @@ pub fn run(
     code_lang: Option<&str>,
 ) -> Result<()> {
     if !io::stdout().is_terminal() {
-        return print_to_stdout(markdown);
+        print_to_stdout(markdown);
+        return Ok(());
     }
 
     let (mut cols, mut rows) = terminal::size().context("no terminal available")?;
     if cols == 0 || rows == 0 {
-        return print_to_stdout(markdown);
+        print_to_stdout(markdown);
+        return Ok(());
     }
 
     // Resolve initial theme: CLI flag > saved preference > default.
@@ -338,10 +341,10 @@ pub fn run(
                     .unwrap_or_else(|| markdown.to_string());
                 // Apply theme bg to every line so the VT cells pick it up.
                 let bg = ansi_bg(theme.bg);
-                let ansi: String = highlighted
-                    .lines()
-                    .map(|line| format!("{bg}{line}{ANSI_CLEAR_EOL}{ANSI_RESET}\r\n"))
-                    .collect();
+                let ansi = highlighted.lines().fold(String::new(), |mut acc, line| {
+                    let _ = write!(acc, "{bg}{line}{ANSI_CLEAR_EOL}{ANSI_RESET}\r\n");
+                    acc
+                });
                 (ansi, Vec::new())
             } else {
                 // Markdown path: syntect (inside fences) → termimad → VT.
@@ -362,7 +365,9 @@ pub fn run(
 
                 let skin = theme::build_skin(theme);
                 let joined = join_paragraphs(&processed_md);
-                let rendered = skin.text(&joined, Some(inner_cols as usize)).to_string();
+                let rendered = skin
+                    .text(&joined, Some(usize::from(inner_cols)))
+                    .to_string();
                 let ansi = rendered.replace('\n', "\r\n");
                 let ansi = strip_leading_blank_lines(&ansi).to_string();
                 (ansi, placements)
@@ -380,6 +385,7 @@ pub fn run(
             // Apply initial scroll position (--line flag or heading jump).
             if let Some(line) = goto_line.take() {
                 // line is 1-indexed; scroll to put that line at the top.
+                #[allow(clippy::cast_possible_wrap)]
                 let delta = line.saturating_sub(1) as isize;
                 if delta > 0 {
                     use libghostty_vt::terminal::ScrollViewport;
@@ -616,8 +622,10 @@ fn run_inner_loop<'a>(
 
         // ── Draw content (rows 1 .. content_rows) ────────────────
         {
-            let snapshot = render_state.update(term)?;
-            let mut row_iter = row_it.update(&snapshot)?;
+            let snapshot = render_state
+                .update(term)
+                .context("VT render state update")?;
+            let mut row_iter = row_it.update(&snapshot).context("VT row iterator update")?;
             let mut screen_row: u16 = 0;
 
             while let Some(row) = row_iter.next() {
@@ -634,7 +642,7 @@ fn run_inner_loop<'a>(
                     SetAttribute(Attribute::Reset),
                     SetForegroundColor(theme.fg),
                     SetBackgroundColor(theme.bg),
-                    Print(" ".repeat(SIDE_PAD as usize)),
+                    Print(" ".repeat(usize::from(SIDE_PAD))),
                 )?;
 
                 let mut col_pos: u16 = 0;
@@ -647,18 +655,18 @@ fn run_inner_loop<'a>(
                     let fg_rgb = cell.fg_color()?;
                     let bg_rgb = cell.bg_color()?;
 
-                    let fg = fg_rgb.map(rgb_to_color).unwrap_or(theme.fg);
-                    let bg = bg_rgb.map(rgb_to_color).unwrap_or(theme.bg);
+                    let fg = fg_rgb.map_or(theme.fg, rgb_to_color);
+                    let bg = bg_rgb.map_or(theme.bg, rgb_to_color);
 
-                    let (draw_fg, draw_bg) = if style.inverse { (bg, fg) } else { (fg, bg) };
+                    let (foreground, background) = if style.inverse { (bg, fg) } else { (fg, bg) };
 
                     // Reset attributes before each cell to prevent leakage,
                     // then apply only the attributes this cell actually needs.
                     queue!(
                         stdout,
                         SetAttribute(Attribute::Reset),
-                        SetForegroundColor(draw_fg),
-                        SetBackgroundColor(draw_bg),
+                        SetForegroundColor(foreground),
+                        SetBackgroundColor(background),
                     )?;
 
                     if style.bold {
@@ -676,6 +684,7 @@ fn run_inner_loop<'a>(
                         col_pos += 1;
                     } else {
                         let text: String = graphemes.into_iter().collect();
+                        #[allow(clippy::cast_possible_truncation)]
                         let w = UnicodeWidthStr::width(text.as_str()) as u16;
                         queue!(stdout, Print(&text))?;
                         col_pos += w;
@@ -683,14 +692,14 @@ fn run_inner_loop<'a>(
                 }
 
                 // Fill remaining inner area + right padding to terminal edge.
-                let filled = SIDE_PAD as usize + col_pos as usize;
-                if filled < cols as usize {
+                let filled = usize::from(SIDE_PAD) + usize::from(col_pos);
+                if filled < usize::from(cols) {
                     queue!(
                         stdout,
                         SetAttribute(Attribute::Reset),
                         SetForegroundColor(theme.fg),
                         SetBackgroundColor(theme.bg),
-                        Print(" ".repeat(cols as usize - filled)),
+                        Print(" ".repeat(usize::from(cols) - filled)),
                     )?;
                 }
 
@@ -705,7 +714,7 @@ fn run_inner_loop<'a>(
                     stdout,
                     SetForegroundColor(theme.fg),
                     SetBackgroundColor(theme.bg),
-                    Print(" ".repeat(cols as usize)),
+                    Print(" ".repeat(usize::from(cols))),
                     ResetColor,
                 )?;
                 screen_row += 1;
@@ -748,7 +757,7 @@ fn run_inner_loop<'a>(
 /// current viewport.
 ///
 /// Uses `Terminal::scrollbar()` to determine the scroll offset, then maps
-/// each `ImagePlacement.content_row` to a screen row. Images that are
+/// each `ImagePlacement::content_row` to a screen row. Images that are
 /// partially or fully off-screen are skipped.
 fn emit_visible_images(
     stdout: &mut io::Stdout,
@@ -757,21 +766,23 @@ fn emit_visible_images(
     content_rows: u16,
 ) -> Result<()> {
     // Determine the scroll offset: which document row is at the top of the viewport.
-    let scrollbar = term.scrollbar()?;
+    let scrollbar = term.scrollbar().context("VT scrollbar query")?;
+    #[allow(clippy::cast_possible_truncation)]
     let viewport_top = scrollbar.offset as usize;
 
     for placement in placements {
         let img_start = placement.content_row;
-        let img_end = img_start + placement.rows as usize;
+        let img_end = img_start + usize::from(placement.rows);
 
         // Check if any part of the image is visible in the viewport.
-        let viewport_end = viewport_top + content_rows as usize;
+        let viewport_end = viewport_top + usize::from(content_rows);
         if img_end <= viewport_top || img_start >= viewport_end {
             continue; // entirely off-screen
         }
 
         // Screen row where the image starts (relative to content area).
         // Content area starts at terminal row 1 (after header).
+        #[allow(clippy::cast_possible_truncation)]
         let screen_row = if img_start >= viewport_top {
             (img_start - viewport_top) as u16
         } else {
@@ -802,7 +813,7 @@ fn draw_header(stdout: &mut io::Stdout, cols: u16, theme: &Theme, filename: &str
     )?;
 
     // Left: padding + "REED" title + version + separator + filename.
-    let pad = " ".repeat(SIDE_PAD as usize);
+    let pad = " ".repeat(usize::from(SIDE_PAD));
     let title = "REED";
     queue!(
         stdout,
@@ -832,11 +843,11 @@ fn draw_header(stdout: &mut io::Stdout, cols: u16, theme: &Theme, filename: &str
 
     // Truncate filename if needed, reserving SIDE_PAD on the right.
     // Use visual width (not byte len) because separator contains multi-byte │.
-    let used = SIDE_PAD as usize
+    let used = usize::from(SIDE_PAD)
         + UnicodeWidthStr::width(title)
         + UnicodeWidthStr::width(version)
         + UnicodeWidthStr::width(separator);
-    let remaining = (cols as usize).saturating_sub(used + SIDE_PAD as usize);
+    let remaining = usize::from(cols).saturating_sub(used + usize::from(SIDE_PAD));
     let display_name = if filename.len() > remaining {
         &filename[filename.len() - remaining..]
     } else {
@@ -846,8 +857,8 @@ fn draw_header(stdout: &mut io::Stdout, cols: u16, theme: &Theme, filename: &str
 
     // Fill rest of header row with background.
     let total_used = used + UnicodeWidthStr::width(display_name);
-    if total_used < cols as usize {
-        queue!(stdout, Print(" ".repeat(cols as usize - total_used)))?;
+    if total_used < usize::from(cols) {
+        queue!(stdout, Print(" ".repeat(usize::from(cols) - total_used)))?;
     }
 
     queue!(stdout, ResetColor)?;
@@ -867,7 +878,7 @@ fn draw_footer(stdout: &mut io::Stdout, row: u16, cols: u16, theme: &Theme) -> R
     )?;
 
     // Left padding.
-    let pad = " ".repeat(SIDE_PAD as usize);
+    let pad = " ".repeat(usize::from(SIDE_PAD));
     queue!(stdout, Print(&pad))?;
 
     // Left side: key hints — colorful on transparent background.
@@ -893,18 +904,18 @@ fn draw_footer(stdout: &mut io::Stdout, row: u16, cols: u16, theme: &Theme) -> R
     }
 
     // Use visual width (not byte len) because separators contain multi-byte │.
-    let left_len: usize = SIDE_PAD as usize
+    let left_len: usize = usize::from(SIDE_PAD)
         + key_hints
             .iter()
             .map(|(_, t)| UnicodeWidthStr::width(*t))
             .sum::<usize>();
 
     // Right side: theme name + right padding.
-    let right = format!("{}{}", theme.name, &pad);
+    let right = format!("{}{pad}", theme.name);
     let right_len = right.len();
 
     // Fill middle with background.
-    let middle = (cols as usize).saturating_sub(left_len + right_len);
+    let middle = usize::from(cols).saturating_sub(left_len + right_len);
     queue!(
         stdout,
         SetForegroundColor(theme.fg),
@@ -953,17 +964,17 @@ fn render_size_warning(stdout: &mut io::Stdout, cols: u16, rows: u16, theme: &Th
     execute!(stdout, terminal::Clear(ClearType::All))?;
 
     let msg = format!(
-        "Terminal too small: {}x{} (need {}x{}). Please resize.",
-        cols, rows, MIN_TERM_WIDTH, MIN_TERM_HEIGHT,
+        "Terminal too small: {cols}x{rows} (need {MIN_TERM_WIDTH}x{MIN_TERM_HEIGHT}). Please resize.",
     );
 
     // Center the message vertically and horizontally.
     let y = rows / 2;
-    let x = (cols as usize).saturating_sub(msg.len()) / 2;
+    #[allow(clippy::cast_possible_truncation)]
+    let x = (usize::from(cols).saturating_sub(msg.len()) / 2) as u16;
 
     queue!(
         stdout,
-        cursor::MoveTo(x as u16, y),
+        cursor::MoveTo(x, y),
         SetForegroundColor(theme.accent),
         Print(&msg),
         ResetColor,
@@ -1008,7 +1019,7 @@ fn rgb_to_color(rgb: libghostty_vt::style::RgbColor) -> Color {
 
 /// Strip leading blank lines from ANSI text.
 ///
-/// termimad may emit lines that contain only ANSI escape sequences (SGR codes)
+/// `termimad` may emit lines that contain only ANSI escape sequences (SGR codes)
 /// and whitespace before `\r\n`. These show up as blank rows in the VT terminal.
 /// This function strips all such leading lines so content starts immediately.
 fn strip_leading_blank_lines(s: &str) -> &str {
@@ -1037,9 +1048,8 @@ fn strip_leading_blank_lines(s: &str) -> &str {
                 if !found_printable {
                     start = i + 2; // skip past this blank line, try next
                     break;
-                } else {
-                    return &s[start..]; // first line has content, stop
                 }
+                return &s[start..]; // first line has content, stop
             } else if bytes[i] == b' ' || bytes[i] == b'\t' {
                 i += 1; // whitespace — not printable content
             } else {
@@ -1059,8 +1069,8 @@ fn strip_leading_blank_lines(s: &str) -> &str {
 
 /// Pre-process markdown to join consecutive plain-text lines into single lines.
 ///
-/// minimad (termimad's parser) splits on every `\n`, treating each source line
-/// as its own paragraph. CommonMark instead joins consecutive non-blank lines.
+/// `minimad` (`termimad`'s parser) splits on every `\n`, treating each source line
+/// as its own paragraph. `CommonMark` instead joins consecutive non-blank lines.
 /// This function merges those "continuation" lines so termimad can reflow them
 /// to the terminal width.
 ///
@@ -1211,7 +1221,8 @@ fn is_horizontal_rule(trimmed: &str) -> bool {
     if chars_only.len() < 3 {
         return false;
     }
-    let first = chars_only.chars().next().unwrap();
+    // The length guard above guarantees at least one character.
+    let first = chars_only.chars().next().expect("guarded by len >= 3");
     if !matches!(first, '-' | '*' | '_') {
         return false;
     }

@@ -35,7 +35,6 @@ pub struct ImageRef {
 
 /// A positioned image ready for rendering.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ImagePlacement {
     /// PNG-encoded bytes of the (possibly resized) image.
     pub png_data: Vec<u8>,
@@ -47,17 +46,19 @@ pub struct ImagePlacement {
     pub cols: u16,
     /// Display height in terminal rows.
     pub rows: u16,
-    /// Alt text for fallback.
+    /// Alt text for fallback (reserved for non-Kitty terminals).
+    #[allow(dead_code)]
     pub alt: String,
 }
 
 /// Get the terminal's cell dimensions in pixels by querying the ioctl.
-/// Returns (cell_width_px, cell_height_px) or a sensible default.
+/// Returns (`cell_width_px`, `cell_height_px`) or a sensible default.
 pub fn cell_size_px() -> (u16, u16) {
     #[cfg(unix)]
     {
         use std::mem::MaybeUninit;
         #[repr(C)]
+        #[allow(clippy::struct_field_names)]
         struct Winsize {
             ws_row: u16,
             ws_col: u16,
@@ -65,13 +66,21 @@ pub fn cell_size_px() -> (u16, u16) {
             ws_ypixel: u16,
         }
         let mut ws = MaybeUninit::<Winsize>::uninit();
-        // TIOCGWINSZ = 0x5413 on Linux, 0x40087468 on macOS
+        // TIOCGWINSZ = 0x5413 on Linux, 0x4008_7468 on macOS
         #[cfg(target_os = "macos")]
-        const TIOCGWINSZ: u64 = 0x40087468;
+        #[allow(clippy::items_after_statements)]
+        const TIOCGWINSZ: u64 = 0x4008_7468;
         #[cfg(target_os = "linux")]
+        #[allow(clippy::items_after_statements)]
         const TIOCGWINSZ: u64 = 0x5413;
+        // SAFETY: `libc_ioctl` is the POSIX `ioctl(2)` function. Passing
+        // `TIOCGWINSZ` with a valid `Winsize` pointer is the standard way to
+        // query terminal pixel dimensions. `ws` is an out-parameter written
+        // by the kernel when the call succeeds (ret == 0).
         let ret = unsafe { libc_ioctl(libc_stdout(), TIOCGWINSZ, ws.as_mut_ptr()) };
         if ret == 0 {
+            // SAFETY: The ioctl succeeded (ret == 0), so the kernel has
+            // fully initialised the `Winsize` struct behind the pointer.
             let ws = unsafe { ws.assume_init() };
             if ws.ws_xpixel > 0 && ws.ws_ypixel > 0 && ws.ws_col > 0 && ws.ws_row > 0 {
                 return (ws.ws_xpixel / ws.ws_col, ws.ws_ypixel / ws.ws_row);
@@ -83,6 +92,9 @@ pub fn cell_size_px() -> (u16, u16) {
 }
 
 #[cfg(unix)]
+// SAFETY: Declares the POSIX `ioctl(2)` variadic C function. We only call it
+// with `TIOCGWINSZ` and a `*mut Winsize` argument, which is the documented
+// ABI for querying terminal window size.
 unsafe extern "C" {
     #[link_name = "ioctl"]
     fn libc_ioctl(fd: i32, request: u64, ...) -> i32;
@@ -133,7 +145,10 @@ pub fn extract_images(markdown: &str, base_dir: &Path) -> Vec<ImageRef> {
 /// so the VT terminal reserves vertical space for the image. Returns the
 /// modified markdown and a mapping from each `ImageRef` to the content row
 /// where its placeholder starts.
-#[allow(dead_code)]
+///
+/// Note: Production code uses `build_processed_markdown()` in `viewer.rs`
+/// instead. This function is retained for unit tests.
+#[cfg(test)]
 pub fn replace_images(
     markdown: &str,
     images: &[ImageRef],
@@ -206,12 +221,13 @@ pub fn load_image(
     }
 
     // Maximum pixel width = max_cols * cell_width_px.
-    let max_px_w = max_cols as u32 * cell_w as u32;
+    let max_px_w = u32::from(max_cols) * u32::from(cell_w);
 
     // Scale down if wider than terminal, preserving aspect ratio.
     let (target_w, target_h) = if orig_w > max_px_w {
-        let scale = max_px_w as f64 / orig_w as f64;
-        let h = (orig_h as f64 * scale).round() as u32;
+        let scale = f64::from(max_px_w) / f64::from(orig_w);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let h = (f64::from(orig_h) * scale).round() as u32;
         (max_px_w, h.max(1))
     } else {
         (orig_w, orig_h)
@@ -228,8 +244,10 @@ pub fn load_image(
     }
 
     // Compute display dimensions in cells.
-    let display_cols = (target_w as f64 / cell_w as f64).ceil() as u16;
-    let display_rows = (target_h as f64 / cell_h as f64).ceil() as u16;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let display_cols = (f64::from(target_w) / f64::from(cell_w)).ceil() as u16;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let display_rows = (f64::from(target_h) / f64::from(cell_h)).ceil() as u16;
 
     Some((png_bytes, display_cols, display_rows.max(1)))
 }
@@ -260,12 +278,13 @@ pub fn load_image_from_bytes(
     }
 
     // Maximum pixel width = max_cols * cell_width_px.
-    let max_px_w = max_cols as u32 * cell_w as u32;
+    let max_px_w = u32::from(max_cols) * u32::from(cell_w);
 
     // Scale down if wider than terminal, preserving aspect ratio.
     let (target_w, target_h) = if orig_w > max_px_w {
-        let scale = max_px_w as f64 / orig_w as f64;
-        let h = (orig_h as f64 * scale).round() as u32;
+        let scale = f64::from(max_px_w) / f64::from(orig_w);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let h = (f64::from(orig_h) * scale).round() as u32;
         (max_px_w, h.max(1))
     } else {
         (orig_w, orig_h)
@@ -282,40 +301,12 @@ pub fn load_image_from_bytes(
     }
 
     // Compute display dimensions in cells.
-    let display_cols = (target_w as f64 / cell_w as f64).ceil() as u16;
-    let display_rows = (target_h as f64 / cell_h as f64).ceil() as u16;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let display_cols = (f64::from(target_w) / f64::from(cell_w)).ceil() as u16;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let display_rows = (f64::from(target_h) / f64::from(cell_h)).ceil() as u16;
 
     Some((png_bytes, display_cols, display_rows.max(1)))
-}
-
-/// Build `ImagePlacement` entries for all extractable images.
-#[allow(dead_code)]
-pub fn prepare_placements(
-    images: &[ImageRef],
-    content_rows: &[usize],
-    max_cols: u16,
-    cell_w: u16,
-    cell_h: u16,
-) -> Vec<ImagePlacement> {
-    let mut placements = Vec::new();
-
-    for (i, img) in images.iter().enumerate() {
-        let content_row = content_rows.get(i).copied().unwrap_or(0);
-
-        if let Some((png_data, cols, rows)) = load_image(&img.path, max_cols, cell_w, cell_h) {
-            placements.push(ImagePlacement {
-                png_data,
-                content_row,
-                cols,
-                rows,
-                alt: img.alt.clone(),
-            });
-        } else {
-            debug!(path = %img.path.display(), "skipping unloadable image");
-        }
-    }
-
-    placements
 }
 
 // ── Kitty graphics protocol ──────────────────────────────────────
@@ -338,7 +329,7 @@ pub fn emit_kitty_image<W: Write>(w: &mut W, png_data: &[u8], cols: u16, rows: u
     while offset < bytes.len() {
         let end = (offset + CHUNK_SIZE).min(bytes.len());
         let chunk = &bytes[offset..end];
-        let more = if end < bytes.len() { 1 } else { 0 };
+        let more = i32::from(end < bytes.len());
 
         if first {
             // First chunk carries all metadata.
@@ -347,14 +338,10 @@ pub fn emit_kitty_image<W: Write>(w: &mut W, png_data: &[u8], cols: u16, rows: u
             // q=2  — suppress terminal responses
             // C=1  — do NOT move cursor after display
             // c/r  — display size in cells
-            write!(
-                w,
-                "\x1b_Ga=T,f=100,q=2,C=1,c={},r={},m={};",
-                cols, rows, more
-            )?;
+            write!(w, "\x1b_Ga=T,f=100,q=2,C=1,c={cols},r={rows},m={more};",)?;
             first = false;
         } else {
-            write!(w, "\x1b_Gm={};", more)?;
+            write!(w, "\x1b_Gm={more};")?;
         }
 
         w.write_all(chunk)?;
@@ -378,14 +365,17 @@ pub fn estimate_image_rows(path: &Path, max_cols: u16, cell_w: u16, cell_h: u16)
             if orig_w == 0 || orig_h == 0 {
                 return 1;
             }
-            let max_px_w = max_cols as u32 * cell_w as u32;
+            let max_px_w = u32::from(max_cols) * u32::from(cell_w);
             let target_h = if orig_w > max_px_w {
-                let scale = max_px_w as f64 / orig_w as f64;
-                (orig_h as f64 * scale).round() as u32
+                let scale = f64::from(max_px_w) / f64::from(orig_w);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let h = (f64::from(orig_h) * scale).round() as u32;
+                h
             } else {
                 orig_h
             };
-            let rows = (target_h as f64 / cell_h as f64).ceil() as u16;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let rows = (f64::from(target_h) / f64::from(cell_h)).ceil() as u16;
             rows.max(1)
         }
         Err(e) => {

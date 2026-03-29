@@ -10,7 +10,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 /// Terminal file viewer with syntax highlighting, powered by libghostty-vt.
@@ -21,6 +21,7 @@ use clap::Parser;
 /// candidates (e.g. `find . -name '*.rs' | reed`).
 #[derive(Parser)]
 #[command(name = "reed", version, about)]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// File to display. If omitted, launches fzf for interactive file picking.
     file: Option<PathBuf>,
@@ -34,7 +35,7 @@ struct Cli {
     print: bool,
 
     /// Preview mode: themed ANSI output to stdout for use with fzf --preview.
-    /// Respects FZF_PREVIEW_COLUMNS and FZF_PREVIEW_LINES if set.
+    /// Respects `FZF_PREVIEW_COLUMNS` and `FZF_PREVIEW_LINES` if set.
     #[arg(long)]
     preview: bool,
 
@@ -86,14 +87,11 @@ fn main() -> Result<()> {
     }
 
     // No file argument → launch fzf picker mode.
-    let file = match cli.file {
-        Some(f) => f,
-        None => {
-            if cli.preview || cli.print {
-                bail!("--preview and --print require a file argument");
-            }
-            return fzf_pick_and_view(cli.theme.as_deref(), cli.max_scrollback);
+    let Some(file) = cli.file else {
+        if cli.preview || cli.print {
+            bail!("--preview and --print require a file argument");
         }
+        return fzf_pick_and_view(cli.theme.as_deref(), cli.max_scrollback);
     };
 
     let raw_content = std::fs::read_to_string(&file)
@@ -113,12 +111,12 @@ fn main() -> Result<()> {
         .canonicalize()
         .unwrap_or_else(|_| file.clone())
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
 
     if cli.print {
         if is_markdown {
-            viewer::print_to_stdout(&raw_content)
+            viewer::print_to_stdout(&raw_content);
+            Ok(())
         } else {
             viewer::preview_code(
                 &raw_content,
@@ -166,7 +164,7 @@ fn cycle_theme(forward: bool) -> Result<()> {
     let new_prefs = config::Preferences {
         theme: theme::THEMES[next].name.to_string(),
     };
-    config::save_preferences(&new_prefs)?;
+    config::save_preferences(&new_prefs).context("failed to save theme preference")?;
     Ok(())
 }
 
@@ -185,7 +183,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         let prefs = config::Preferences {
             theme: t.to_string(),
         };
-        config::save_preferences(&prefs)?;
+        config::save_preferences(&prefs).context("failed to save theme preference")?;
     }
 
     // Resolve our own binary path so the preview command works regardless
@@ -267,8 +265,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         .canonicalize()
         .unwrap_or_else(|_| file.clone())
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
 
     viewer::run(
         &raw_content,
