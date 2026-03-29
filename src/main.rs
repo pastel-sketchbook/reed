@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 
-/// Terminal markdown viewer powered by libghostty-vt.
+/// Terminal file viewer with syntax highlighting, powered by libghostty-vt.
 #[derive(Parser)]
 #[command(name = "reed", version, about)]
 struct Cli {
-    /// Markdown file to display.
+    /// File to display (markdown rendered richly; code files syntax-highlighted).
     file: PathBuf,
 
     /// Maximum scrollback lines (default: 100 000).
@@ -50,12 +50,24 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let markdown = std::fs::read_to_string(&cli.file)
+    let raw_content = std::fs::read_to_string(&cli.file)
         .with_context(|| format!("failed to read {}", cli.file.display()))?;
+
+    // If the file is not markdown, wrap it in a fenced code block so the
+    // existing pipeline (termimad + syntect) renders it with syntax highlighting.
+    let markdown = if highlight::is_markdown_path(&cli.file) {
+        raw_content
+    } else if let Some(lang) = highlight::lang_for_path(&cli.file) {
+        highlight::wrap_in_code_fence(&raw_content, &lang)
+    } else {
+        // Unknown extension — wrap in a bare fence (no highlighting, but
+        // still rendered as a code block with monospace font).
+        highlight::wrap_in_code_fence(&raw_content, "")
+    };
 
     let filename = cli.file.display().to_string();
 
-    // Resolve the directory containing the markdown file (for relative image paths).
+    // Resolve the directory containing the file (for relative image paths).
     let base_dir = cli
         .file
         .canonicalize()

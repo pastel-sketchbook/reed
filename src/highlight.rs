@@ -52,6 +52,50 @@ fn syntect_theme_name(bg: Color) -> &'static str {
     }
 }
 
+// ── File-type detection ──────────────────────────────────────────
+
+/// Markdown file extensions (case-insensitive check done by caller).
+const MARKDOWN_EXTS: &[&str] = &["md", "markdown", "mdown", "mkd", "mdx"];
+
+/// Return `true` if `path` looks like a Markdown file based on its extension.
+pub fn is_markdown_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| MARKDOWN_EXTS.iter().any(|m| m.eq_ignore_ascii_case(ext)))
+}
+
+/// Derive a language tag from a file path's extension.
+///
+/// Returns `Some("rs")` for `foo.rs`, `None` for files without an extension
+/// or whose extension isn't recognized by syntect's default syntax set.
+/// The returned tag is suitable for use with `highlight_code()` (syntect
+/// resolves it via `find_syntax_by_extension`).
+pub fn lang_for_path(path: &std::path::Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?;
+    let ss = syntax_set();
+    // Validate that syntect actually knows this extension.
+    ss.find_syntax_by_extension(ext)?;
+    Some(ext.to_lowercase())
+}
+
+/// Wrap raw source code in a Markdown fenced code block.
+///
+/// Used to route non-Markdown files through the normal rendering pipeline
+/// (termimad + syntect highlighting).
+pub fn wrap_in_code_fence(source: &str, lang: &str) -> String {
+    // Use a long fence to avoid conflicts with content.
+    let mut out = String::with_capacity(source.len() + lang.len() + 16);
+    out.push_str("```");
+    out.push_str(lang);
+    out.push('\n');
+    out.push_str(source);
+    if !source.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n");
+    out
+}
+
 // ── Core highlighting ────────────────────────────────────────────
 
 /// Highlight a code block using syntect.
@@ -363,5 +407,54 @@ def bar():
         assert_eq!(extract_fence_lang("```"), None);
         assert_eq!(extract_fence_lang("~~~"), None);
         assert_eq!(extract_fence_lang("not a fence"), None);
+    }
+
+    #[test]
+    fn is_markdown_path_cases() {
+        use std::path::Path;
+        assert!(is_markdown_path(Path::new("README.md")));
+        assert!(is_markdown_path(Path::new("notes.markdown")));
+        assert!(is_markdown_path(Path::new("doc.MDX")));
+        assert!(!is_markdown_path(Path::new("main.rs")));
+        assert!(!is_markdown_path(Path::new("script.py")));
+        assert!(!is_markdown_path(Path::new("noext")));
+    }
+
+    #[test]
+    fn lang_for_path_known_extensions() {
+        use std::path::Path;
+        assert_eq!(lang_for_path(Path::new("main.rs")), Some("rs".to_string()));
+        assert_eq!(lang_for_path(Path::new("app.py")), Some("py".to_string()));
+        assert_eq!(lang_for_path(Path::new("index.js")), Some("js".to_string()));
+    }
+
+    #[test]
+    fn lang_for_path_unknown_extension() {
+        use std::path::Path;
+        // .xyzlang should not be recognized by syntect.
+        assert_eq!(lang_for_path(Path::new("file.xyzlang")), None);
+        // No extension at all.
+        assert_eq!(lang_for_path(Path::new("Makefile")), None);
+    }
+
+    #[test]
+    fn wrap_in_code_fence_basic() {
+        let src = "fn main() {}\n";
+        let wrapped = wrap_in_code_fence(src, "rs");
+        assert_eq!(wrapped, "```rs\nfn main() {}\n```\n");
+    }
+
+    #[test]
+    fn wrap_in_code_fence_no_trailing_newline() {
+        let src = "hello";
+        let wrapped = wrap_in_code_fence(src, "txt");
+        assert_eq!(wrapped, "```txt\nhello\n```\n");
+    }
+
+    #[test]
+    fn wrap_in_code_fence_bare() {
+        let src = "some content\n";
+        let wrapped = wrap_in_code_fence(src, "");
+        assert_eq!(wrapped, "```\nsome content\n```\n");
     }
 }
