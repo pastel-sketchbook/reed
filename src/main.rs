@@ -1,9 +1,10 @@
 mod config;
+mod images;
 mod input;
 mod theme;
 mod viewer;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -43,6 +44,15 @@ fn main() -> Result<()> {
 
     let filename = cli.file.display().to_string();
 
+    // Resolve the directory containing the markdown file (for relative image paths).
+    let base_dir = cli
+        .file
+        .canonicalize()
+        .unwrap_or_else(|_| cli.file.clone())
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
     if cli.print {
         viewer::print_to_stdout(&markdown)
     } else {
@@ -51,6 +61,7 @@ fn main() -> Result<()> {
             cli.max_scrollback,
             cli.theme.as_deref(),
             &filename,
+            &base_dir,
         )
     }
 }

@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, Write};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -15,8 +16,9 @@ use tracing::warn;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config;
+use crate::images::{self, ImagePlacement};
 use crate::input;
-use crate::theme::{self, Theme, MIN_TERM_HEIGHT, MIN_TERM_WIDTH};
+use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
@@ -47,6 +49,7 @@ pub fn run(
     max_scrollback: usize,
     initial_theme: Option<&str>,
     filename: &str,
+    base_dir: &Path,
 ) -> Result<()> {
     if !io::stdout().is_terminal() {
         return print_to_stdout(markdown);
@@ -74,6 +77,10 @@ pub fn run(
             terminal::Clear(ClearType::All)
         )?;
 
+        // Extract image references once from the original markdown.
+        let image_refs = images::extract_images(markdown, base_dir);
+        let (cell_w, cell_h) = images::cell_size_px();
+
         loop {
             let theme = &theme::THEMES[theme_index];
 
@@ -95,9 +102,55 @@ pub fn run(
             let content_rows = rows.saturating_sub(2).max(1);
             let inner_cols = cols.saturating_sub(2 * SIDE_PAD).max(1);
 
+            // --- Image pre-processing ---
+            // Estimate how many rows each image needs, then replace image
+            // lines with blank placeholders so the VT reserves space.
+            let image_row_counts: Vec<u16> = image_refs
+                .iter()
+                .map(|img| images::estimate_image_rows(&img.path, inner_cols, cell_w, cell_h))
+                .collect();
+
+            let (processed_md, placeholder_rows) = if image_refs.is_empty() {
+                (markdown.to_string(), Vec::new())
+            } else {
+                // Use per-image row counts for placeholders.
+                let mut content_row_offsets = Vec::new();
+                let lines: Vec<&str> = markdown.lines().collect();
+                let image_line_set: std::collections::HashSet<usize> =
+                    image_refs.iter().map(|r| r.source_line).collect();
+
+                let mut output = String::with_capacity(markdown.len());
+                let mut output_line_count: usize = 0;
+
+                for (idx, &line) in lines.iter().enumerate() {
+                    if image_line_set.contains(&idx) {
+                        // Find which image this is.
+                        let img_idx = image_refs
+                            .iter()
+                            .position(|r| r.source_line == idx)
+                            .unwrap();
+                        content_row_offsets.push(output_line_count);
+                        let row_count = image_row_counts[img_idx];
+                        for _ in 0..row_count {
+                            output.push('\n');
+                            output_line_count += 1;
+                        }
+                    } else {
+                        output.push_str(line);
+                        output.push('\n');
+                        output_line_count += 1;
+                    }
+                }
+
+                if !markdown.ends_with('\n') && output.ends_with('\n') {
+                    output.pop();
+                }
+                (output, content_row_offsets)
+            };
+
             // Build themed skin and render markdown → ANSI.
             let skin = theme::build_skin(theme);
-            let joined = join_paragraphs(markdown);
+            let joined = join_paragraphs(&processed_md);
             let ansi_text = skin.text(&joined, Some(inner_cols as usize)).to_string();
 
             // termimad uses bare \n for line breaks, but the VT terminal
@@ -110,6 +163,15 @@ pub fn run(
             // (ANSI escape codes followed by \r\n with no printable text).
             // Strip it so content starts immediately below the header bar.
             let ansi_text = strip_leading_blank_lines(&ansi_text);
+
+            // Load and prepare image placements for rendering.
+            let placements = images::prepare_placements(
+                &image_refs,
+                &placeholder_rows,
+                inner_cols,
+                cell_w,
+                cell_h,
+            );
 
             // Create the virtual terminal and feed rendered content.
             let mut term = Terminal::new(TerminalOptions {
@@ -137,6 +199,7 @@ pub fn run(
                 cols,
                 theme,
                 filename,
+                &placements,
             )? {
                 LoopExit::Quit => break,
                 LoopExit::NextTheme => {
@@ -185,6 +248,7 @@ fn run_inner_loop<'a>(
     cols: u16,
     theme: &Theme,
     filename: &str,
+    placements: &[ImagePlacement],
 ) -> Result<LoopExit> {
     loop {
         // ── Draw header (row 0) ──────────────────────────────────
@@ -289,6 +353,11 @@ fn run_inner_loop<'a>(
         }
         // snapshot dropped here — render_state is free for input::poll
 
+        // ── Emit Kitty graphics for visible images ───────────────
+        if !placements.is_empty() {
+            emit_visible_images(stdout, term, placements, content_rows)?;
+        }
+
         // ── Draw footer (last row) ──────────────────────────────
         draw_footer(stdout, content_rows + 1, cols, theme)?;
 
@@ -305,6 +374,53 @@ fn run_inner_loop<'a>(
             }
         }
     }
+}
+
+// ── Image rendering ──────────────────────────────────────────────
+
+/// Emit Kitty graphics protocol images for all placements visible in the
+/// current viewport.
+///
+/// Uses `Terminal::scrollbar()` to determine the scroll offset, then maps
+/// each `ImagePlacement.content_row` to a screen row. Images that are
+/// partially or fully off-screen are skipped.
+fn emit_visible_images(
+    stdout: &mut io::Stdout,
+    term: &Terminal<'_, '_>,
+    placements: &[ImagePlacement],
+    content_rows: u16,
+) -> Result<()> {
+    // Determine the scroll offset: which document row is at the top of the viewport.
+    let scrollbar = term.scrollbar()?;
+    let viewport_top = scrollbar.offset as usize;
+
+    for placement in placements {
+        let img_start = placement.content_row;
+        let img_end = img_start + placement.rows as usize;
+
+        // Check if any part of the image is visible in the viewport.
+        let viewport_end = viewport_top + content_rows as usize;
+        if img_end <= viewport_top || img_start >= viewport_end {
+            continue; // entirely off-screen
+        }
+
+        // Screen row where the image starts (relative to content area).
+        // Content area starts at terminal row 1 (after header).
+        let screen_row = if img_start >= viewport_top {
+            (img_start - viewport_top) as u16
+        } else {
+            0 // image starts above viewport, show from top
+        };
+
+        // Position cursor at the image location (left padding + content area).
+        queue!(stdout, cursor::MoveTo(SIDE_PAD, screen_row + 1))?;
+        stdout.flush()?;
+
+        // Emit the Kitty graphics protocol escape sequence.
+        images::emit_kitty_image(stdout, &placement.png_data, placement.cols, placement.rows)?;
+    }
+
+    Ok(())
 }
 
 // ── Header ────────────────────────────────────────────────────────
