@@ -24,9 +24,27 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            theme: theme::THEMES[0].name.to_string(),
+            theme: default_theme_name().to_string(),
         }
     }
+}
+
+/// Pick the default theme based on the terminal environment.
+///
+/// - `TERM=xterm-ghostty` → `"FFE Dark"` (tuned for Ghostty's rendering).
+/// - Otherwise → first theme in `theme::THEMES` (the classic default).
+fn default_theme_name() -> &'static str {
+    if let Ok(term) = std::env::var("TERM")
+        && term == "xterm-ghostty"
+    {
+        // Find FFE Dark by name; fall back to first theme if not found.
+        return theme::THEMES
+            .iter()
+            .find(|t| t.name == "FFE Dark")
+            .map(|t| t.name)
+            .unwrap_or(theme::THEMES[0].name);
+    }
+    theme::THEMES[0].name
 }
 
 /// Resolve the preferences file path.
@@ -70,9 +88,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preferences_default_uses_first_theme() {
+    fn preferences_default_uses_expected_theme() {
         let prefs = Preferences::default();
-        assert_eq!(prefs.theme, theme::THEMES[0].name);
+        assert_eq!(prefs.theme, default_theme_name());
     }
 
     #[test]

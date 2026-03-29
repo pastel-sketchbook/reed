@@ -10,7 +10,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 
 /// Terminal file viewer with syntax highlighting, powered by libghostty-vt.
@@ -55,6 +55,11 @@ struct Cli {
     /// Used internally by the fzf picker for theme switching.
     #[arg(long)]
     prev_theme: bool,
+
+    /// Print the ANSI-styled fzf header line (shortcuts + theme name) and exit.
+    /// Used internally by fzf transform-header to update the header on theme change.
+    #[arg(long)]
+    print_header: bool,
 }
 
 fn main() -> Result<()> {
@@ -70,6 +75,14 @@ fn main() -> Result<()> {
     // Theme cycling mode: update preference and exit immediately.
     if cli.next_theme || cli.prev_theme {
         return cycle_theme(cli.next_theme);
+    }
+
+    // Print fzf header line and exit (used by transform-header).
+    if cli.print_header {
+        let prefs = config::load_preferences();
+        let theme = &theme::THEMES[theme::theme_index_by_name(&prefs.theme)];
+        print!("{}", viewer::fzf_header_line(theme));
+        return Ok(());
     }
 
     // No file argument → launch fzf picker mode.
@@ -188,18 +201,29 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     let next_theme_cmd = format!("{} --next-theme", shell_escape(&reed_bin));
     let prev_theme_cmd = format!("{} --prev-theme", shell_escape(&reed_bin));
 
+    // Header command: prints the styled shortcuts + theme name line.
+    let header_cmd = format!("{} --print-header", shell_escape(&reed_bin));
+
+    // Build the initial header from current preferences.
+    let prefs = config::load_preferences();
+    let initial_theme = &theme::THEMES[theme::theme_index_by_name(&prefs.theme)];
+    let initial_header = viewer::fzf_header_line(initial_theme);
+
     let mut fzf = Command::new("fzf");
+    fzf.arg("--height").arg("90%");
     fzf.arg("--preview").arg(&preview_cmd);
     fzf.arg("--preview-window").arg("right:60%");
+    // Static header showing shortcuts + current theme name.
+    fzf.arg("--header").arg(&initial_header);
     // ctrl-/ cycles through preview layouts.
     fzf.arg("--bind")
         .arg("ctrl-/:change-preview-window(right:60%|up:70%|down:40%|hidden)");
-    // ctrl-n / ctrl-b cycle themes (next / back).
+    // ctrl-n / ctrl-b cycle themes: update prefs, refresh preview, update header.
     fzf.arg("--bind").arg(format!(
-        "ctrl-n:execute-silent({next_theme_cmd})+refresh-preview"
+        "ctrl-n:execute-silent({next_theme_cmd})+refresh-preview+transform-header({header_cmd})"
     ));
     fzf.arg("--bind").arg(format!(
-        "ctrl-b:execute-silent({prev_theme_cmd})+refresh-preview"
+        "ctrl-b:execute-silent({prev_theme_cmd})+refresh-preview+transform-header({header_cmd})"
     ));
 
     // If stdin is piped, fzf inherits it and reads candidates from there.

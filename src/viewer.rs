@@ -20,7 +20,7 @@ use crate::highlight;
 use crate::images::{self, ImagePlacement};
 use crate::input;
 use crate::mermaid;
-use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
+use crate::theme::{self, Theme, MIN_TERM_HEIGHT, MIN_TERM_WIDTH};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
@@ -38,6 +38,37 @@ fn ansi_bg(color: Color) -> String {
 const ANSI_CLEAR_EOL: &str = "\x1b[K";
 /// ANSI escape: reset all attributes.
 const ANSI_RESET: &str = "\x1b[0m";
+/// ANSI escape: bold on.
+const ANSI_BOLD: &str = "\x1b[1m";
+/// ANSI escape: bold off (normal intensity).
+const ANSI_NORMAL: &str = "\x1b[22m";
+
+/// Return the ANSI escape to set the foreground color, or empty string for
+/// `Color::Reset` (terminal default).
+fn ansi_fg(color: Color) -> String {
+    match color {
+        Color::Rgb { r, g, b } => format!("\x1b[38;2;{r};{g};{b}m"),
+        _ => String::new(),
+    }
+}
+
+/// Build the ANSI-styled header line for the fzf picker, showing keyboard
+/// shortcuts and the current theme name. Used by `--header` / `transform-header`.
+pub fn fzf_header_line(theme: &Theme) -> String {
+    let fg = ansi_fg(theme.fg);
+    let accent = ansi_fg(theme.accent);
+    let muted = ansi_fg(theme.muted);
+    let heading = ansi_fg(theme.heading);
+    let sep = "\u{2502}"; // │
+
+    format!(
+        "{accent}{ANSI_BOLD}^n/^b{ANSI_NORMAL} {fg}Theme {muted}{sep}\
+         {accent}{ANSI_BOLD} ^/{ANSI_NORMAL} {fg}Layout {muted}{sep}\
+         {accent}{ANSI_BOLD} enter{ANSI_NORMAL} {fg}Open\
+         {heading}  [{theme_name}]{ANSI_RESET}",
+        theme_name = theme.name,
+    )
+}
 
 /// Check whether the terminal likely supports the Kitty graphics protocol.
 ///
