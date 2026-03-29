@@ -45,6 +45,16 @@ struct Cli {
     /// Scroll to this line number on startup (1-indexed).
     #[arg(long)]
     line: Option<usize>,
+
+    /// Cycle to the next theme, save preference, and exit.
+    /// Used internally by the fzf picker for theme switching.
+    #[arg(long)]
+    next_theme: bool,
+
+    /// Cycle to the previous theme, save preference, and exit.
+    /// Used internally by the fzf picker for theme switching.
+    #[arg(long)]
+    prev_theme: bool,
 }
 
 fn main() -> Result<()> {
@@ -56,6 +66,11 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Theme cycling mode: update preference and exit immediately.
+    if cli.next_theme || cli.prev_theme {
+        return cycle_theme(cli.next_theme);
+    }
 
     // No file argument → launch fzf picker mode.
     let file = match cli.file {
@@ -123,6 +138,25 @@ fn main() -> Result<()> {
     }
 }
 
+// ── Theme cycling (for fzf integration) ─────────────────────────
+
+/// Cycle to the next or previous theme, save the preference, and exit.
+fn cycle_theme(forward: bool) -> Result<()> {
+    let prefs = config::load_preferences();
+    let current = theme::theme_index_by_name(&prefs.theme);
+    let len = theme::THEMES.len();
+    let next = if forward {
+        (current + 1) % len
+    } else {
+        (current + len - 1) % len
+    };
+    let new_prefs = config::Preferences {
+        theme: theme::THEMES[next].name.to_string(),
+    };
+    config::save_preferences(&new_prefs)?;
+    Ok(())
+}
+
 // ── fzf picker mode ─────────────────────────────────────────────
 
 /// Launch fzf with reed as the preview command. When the user selects a
@@ -132,15 +166,27 @@ fn main() -> Result<()> {
 /// candidates from that pipe automatically. Otherwise fzf uses its
 /// default file finder.
 fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
+    // If the user passed --theme, save it as the current preference so the
+    // preview command (which reads from prefs) picks it up.
+    if let Some(t) = theme {
+        let prefs = config::Preferences {
+            theme: t.to_string(),
+        };
+        config::save_preferences(&prefs)?;
+    }
+
     // Resolve our own binary path so the preview command works regardless
     // of how reed was invoked (cargo run, PATH, relative, etc.).
     let reed_bin = std::env::current_exe().context("cannot determine reed binary path")?;
 
     // Build the preview command that fzf will invoke for each candidate.
-    let mut preview_cmd = format!("{} --preview {{}}", shell_escape(&reed_bin));
-    if let Some(t) = theme {
-        preview_cmd.push_str(&format!(" --theme {t}"));
-    }
+    // No --theme flag: the preview reads from saved preferences so that
+    // t/T theme cycling takes effect on reload.
+    let preview_cmd = format!("{} --preview {{}}", shell_escape(&reed_bin));
+
+    // Theme cycling commands.
+    let next_theme_cmd = format!("{} --next-theme", shell_escape(&reed_bin));
+    let prev_theme_cmd = format!("{} --prev-theme", shell_escape(&reed_bin));
 
     let mut fzf = Command::new("fzf");
     fzf.arg("--preview").arg(&preview_cmd);
@@ -148,6 +194,13 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     // ctrl-/ cycles through preview layouts.
     fzf.arg("--bind")
         .arg("ctrl-/:change-preview-window(right:60%|up:70%|down:40%|hidden)");
+    // t/T cycle themes (update preference then reload preview).
+    fzf.arg("--bind").arg(format!(
+        "t:execute-silent({next_theme_cmd})+refresh-preview"
+    ));
+    fzf.arg("--bind").arg(format!(
+        "T:execute-silent({prev_theme_cmd})+refresh-preview"
+    ));
 
     // If stdin is piped, fzf inherits it and reads candidates from there.
     // If stdin is a TTY, fzf uses its built-in file finder.
