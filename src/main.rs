@@ -194,12 +194,12 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     // ctrl-/ cycles through preview layouts.
     fzf.arg("--bind")
         .arg("ctrl-/:change-preview-window(right:60%|up:70%|down:40%|hidden)");
-    // t/T cycle themes (update preference then reload preview).
+    // alt-t / alt-T cycle themes (update preference then reload preview).
     fzf.arg("--bind").arg(format!(
-        "t:execute-silent({next_theme_cmd})+refresh-preview"
+        "alt-t:execute-silent({next_theme_cmd})+refresh-preview"
     ));
     fzf.arg("--bind").arg(format!(
-        "T:execute-silent({prev_theme_cmd})+refresh-preview"
+        "alt-T:execute-silent({prev_theme_cmd})+refresh-preview"
     ));
 
     // If stdin is piped, fzf inherits it and reads candidates from there.
