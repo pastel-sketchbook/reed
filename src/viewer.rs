@@ -230,6 +230,9 @@ enum LoopExit {
     Resize(u16, u16),
     /// Jump to a specific line (from `fzf` heading navigation).
     GotoLine(usize),
+    /// Force a full redraw (screen was dirtied by an external overlay).
+    /// Carries the scroll offset to restore.
+    Redraw(usize),
 }
 
 /// Run the interactive markdown viewer loop.
@@ -382,13 +385,19 @@ pub fn run(
             .context("failed to create libghostty-vt terminal")?;
             term.vt_write(ansi_text.as_bytes());
 
+            // Map headings from markdown line numbers to VT row numbers
+            // so the `s` key navigates to the correct rendered position.
+            let mapped_headings = map_headings_to_vt_rows(&headings, &ansi_text);
+
             // Apply initial scroll position (--line flag or heading jump).
+            // After vt_write the viewport sits at the bottom of the content,
+            // so we must first scroll to Top before applying a forward delta.
             if let Some(line) = goto_line.take() {
-                // line is 1-indexed; scroll to put that line at the top.
+                use libghostty_vt::terminal::ScrollViewport;
+                term.scroll_viewport(ScrollViewport::Top);
                 #[allow(clippy::cast_possible_wrap)]
                 let delta = line.saturating_sub(1) as isize;
                 if delta > 0 {
-                    use libghostty_vt::terminal::ScrollViewport;
                     term.scroll_viewport(ScrollViewport::Delta(delta));
                 }
             }
@@ -411,7 +420,7 @@ pub fn run(
                 theme,
                 filename,
                 &all_placements,
-                &headings,
+                &mapped_headings,
             )? {
                 LoopExit::Quit => break,
                 LoopExit::NextTheme => {
@@ -429,6 +438,10 @@ pub fn run(
                 }
                 LoopExit::GotoLine(line) => {
                     goto_line = Some(line);
+                }
+                LoopExit::Redraw(scroll_pos) => {
+                    // Restore scroll position after overlay dirtied the screen.
+                    goto_line = Some(scroll_pos + 1); // convert 0-indexed to 1-indexed
                 }
             }
         }
@@ -747,6 +760,7 @@ fn run_inner_loop<'a>(
                 return Ok(LoopExit::Resize(new_cols, new_rows));
             }
             input::Action::GotoLine(line) => return Ok(LoopExit::GotoLine(line)),
+            input::Action::Redraw(pos) => return Ok(LoopExit::Redraw(pos)),
         }
     }
 }
@@ -1016,6 +1030,55 @@ fn rgb_to_color(rgb: libghostty_vt::style::RgbColor) -> Color {
 }
 
 // ── ANSI-aware blank line stripping ───────────────────────────────
+
+// ── ANSI / heading helpers ───────────────────────────────────────
+
+/// Strip ANSI escape sequences (CSI, OSC, etc.) from a string, returning
+/// only the visible text.  Used to match heading text in rendered output.
+fn strip_ansi_codes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip the escape sequence until its terminating character.
+            for c2 in chars.by_ref() {
+                if c2.is_ascii_alphabetic() || c2 == '\\' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Map each heading to a 1-indexed VT row by searching the rendered ANSI
+/// text for the heading's text content.  Headings are matched in order,
+/// scanning forward from the last match to handle duplicate names correctly.
+fn map_headings_to_vt_rows(headings: &[input::Heading], ansi_text: &str) -> Vec<input::Heading> {
+    let lines: Vec<String> = ansi_text.split("\r\n").map(strip_ansi_codes).collect();
+    let mut mapped = Vec::with_capacity(headings.len());
+    let mut search_from = 0;
+
+    for h in headings {
+        let mut vt_row = search_from; // default: keep last position
+        for (i, line) in lines.iter().enumerate().skip(search_from) {
+            if line.contains(&h.text) {
+                vt_row = i;
+                search_from = i + 1;
+                break;
+            }
+        }
+        mapped.push(input::Heading {
+            text: h.text.clone(),
+            level: h.level,
+            line: vt_row + 1, // 1-indexed for goto_line
+        });
+    }
+
+    mapped
+}
 
 /// Strip leading blank lines from ANSI text.
 ///
@@ -1448,5 +1511,57 @@ End.\n";
         // One placement for mermaid (image file doesn't exist, so no image placement).
         assert_eq!(placements.len(), 1);
         assert!(result.contains("End."));
+    }
+
+    #[test]
+    fn strip_ansi_codes_removes_sgr() {
+        let input = "\x1b[1;31mHello\x1b[0m world";
+        assert_eq!(strip_ansi_codes(input), "Hello world");
+    }
+
+    #[test]
+    fn strip_ansi_codes_plain_text() {
+        assert_eq!(strip_ansi_codes("no escapes here"), "no escapes here");
+    }
+
+    #[test]
+    fn map_headings_finds_correct_vt_rows() {
+        // Simulate ANSI text with headings at specific rows.
+        let ansi = "intro line\r\n\x1b[1mTitle\x1b[0m\r\nbody\r\n\x1b[1mSection\x1b[0m\r\nmore";
+        let headings = vec![
+            input::Heading {
+                text: "Title".to_string(),
+                level: 1,
+                line: 1,
+            },
+            input::Heading {
+                text: "Section".to_string(),
+                level: 2,
+                line: 5,
+            },
+        ];
+        let mapped = map_headings_to_vt_rows(&headings, ansi);
+        assert_eq!(mapped[0].line, 2); // "Title" is on row 1 (0-indexed), reported as 2 (1-indexed)
+        assert_eq!(mapped[1].line, 4); // "Section" is on row 3 (0-indexed), reported as 4
+    }
+
+    #[test]
+    fn map_headings_duplicate_names_scans_forward() {
+        let ansi = "\x1b[1mFoo\x1b[0m\r\nbody\r\n\x1b[1mFoo\x1b[0m\r\nend";
+        let headings = vec![
+            input::Heading {
+                text: "Foo".to_string(),
+                level: 1,
+                line: 1,
+            },
+            input::Heading {
+                text: "Foo".to_string(),
+                level: 1,
+                line: 3,
+            },
+        ];
+        let mapped = map_headings_to_vt_rows(&headings, ansi);
+        assert_eq!(mapped[0].line, 1); // first "Foo" at row 0 → 1-indexed
+        assert_eq!(mapped[1].line, 3); // second "Foo" at row 2 → 1-indexed
     }
 }

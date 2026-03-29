@@ -19,6 +19,9 @@ pub enum Action {
     PrevTheme,
     /// Jump to a specific line (e.g. from fzf heading navigation).
     GotoLine(usize),
+    /// Force a full redraw (e.g. after an overlay like fzf dirtied the screen).
+    /// Carries the scroll offset to restore after repaint.
+    Redraw(usize),
 }
 
 /// A heading extracted from the markdown source.
@@ -91,10 +94,12 @@ pub fn poll<'a>(
 
             // Fuzzy heading navigation (s = sections)
             (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                if let Some(line) = fzf_heading_picker(headings)? {
-                    return Ok(Action::GotoLine(line));
+                #[allow(clippy::cast_possible_truncation)]
+                let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                match fzf_heading_picker(headings)? {
+                    Some(line) => return Ok(Action::GotoLine(line)),
+                    None => return Ok(Action::Redraw(scroll_pos)),
                 }
-                // User cancelled fzf — continue.
             }
 
             // Scroll down
@@ -151,7 +156,9 @@ pub fn poll<'a>(
 
 /// Launch fzf with the heading list and return the selected heading's line number.
 ///
-/// Temporarily leaves alternate screen so fzf can draw its UI, then returns.
+/// Stays on the alternate screen so the markdown content remains visible
+/// behind fzf.  Uses `--height` + `--border` so fzf appears as a compact
+/// overlay at the bottom of the terminal.
 /// Returns `None` if the user cancelled (Esc / Ctrl-C) or fzf is not installed.
 fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
     if headings.is_empty() {
@@ -177,12 +184,16 @@ fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
         let _ = writeln!(input, "{}:{indent}{}", h.line, h.text);
     }
 
-    // Temporarily leave alternate screen so fzf can render.
+    // Stay on alternate screen — only disable raw mode so fzf can handle
+    // its own terminal input.  Position cursor near the vertical center
+    // so fzf's --height overlay appears centered over the markdown content.
     let mut stdout = std::io::stdout();
     terminal::disable_raw_mode()?;
-    execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
+    let (_, term_rows) = terminal::size().unwrap_or((80, 24));
+    let center_row = term_rows * 30 / 100;
+    execute!(stdout, cursor::MoveTo(0, center_row), cursor::Show)?;
 
-    // Run fzf.
+    // Run fzf as a centered overlay.
     let result = (|| -> Result<Option<usize>> {
         let mut child = Command::new("fzf")
             .arg("--ansi")
@@ -195,6 +206,16 @@ fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
             .arg("2..") // display only the heading text (not the line number)
             .arg("--preview-window")
             .arg("hidden") // no preview pane
+            .arg("--height")
+            .arg("~40%") // compact overlay — shrinks to fit
+            .arg("--layout")
+            .arg("reverse") // prompt at top, items below
+            .arg("--border")
+            .arg("rounded")
+            .arg("--border-label")
+            .arg(" Headings ")
+            .arg("--color")
+            .arg("bg:-1") // transparent background — terminal default shows through
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // fzf draws its UI on stderr
@@ -223,10 +244,10 @@ fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
         Ok(line_num)
     })();
 
-    // Restore alternate screen + raw mode regardless of fzf outcome.
+    // Restore raw mode + hide cursor.  Clear screen so the outer loop
+    // repaints cleanly over any fzf residue.
     execute!(
         stdout,
-        terminal::EnterAlternateScreen,
         cursor::Hide,
         terminal::Clear(terminal::ClearType::All)
     )?;

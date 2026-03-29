@@ -6,7 +6,7 @@ mod mermaid;
 mod theme;
 mod viewer;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -171,11 +171,12 @@ fn cycle_theme(forward: bool) -> Result<()> {
 // ── fzf picker mode ─────────────────────────────────────────────
 
 /// Launch fzf with reed as the preview command. When the user selects a
-/// file, open it in the interactive viewer.
+/// file, open it in the interactive viewer.  Quitting the viewer returns
+/// to the fzf picker; quitting fzf itself exits reed.
 ///
-/// If stdin is not a TTY (i.e. something is piped in), fzf reads its
-/// candidates from that pipe automatically. Otherwise fzf uses its
-/// default file finder.
+/// If stdin is not a TTY (i.e. something is piped in), candidates are
+/// buffered and re-fed to fzf on each iteration so the picker can be
+/// re-launched after the viewer exits.
 fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     // If the user passed --theme, save it as the current preference so the
     // preview command (which reads from prefs) picks it up.
@@ -185,6 +186,18 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         };
         config::save_preferences(&prefs).context("failed to save theme preference")?;
     }
+
+    // If stdin is piped, buffer the candidates so we can re-feed them to fzf
+    // on each loop iteration (the pipe is consumed on first read).
+    let piped_candidates = if !std::io::stdin().is_terminal() {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("failed to read piped candidates")?;
+        Some(buf)
+    } else {
+        None
+    };
 
     // Resolve our own binary path so the preview command works regardless
     // of how reed was invoked (cargo run, PATH, relative, etc.).
@@ -202,80 +215,93 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     // Header command: prints the styled shortcuts + theme name line.
     let header_cmd = format!("{} --print-header", shell_escape(&reed_bin));
 
-    // Build the initial header from current preferences.
-    let prefs = config::load_preferences();
-    let initial_theme = &theme::THEMES[theme::theme_index_by_name(&prefs.theme)];
-    let initial_header = viewer::fzf_header_line(initial_theme);
+    loop {
+        // Build the initial header from current preferences (may have changed
+        // via theme cycling in the previous iteration).
+        let prefs = config::load_preferences();
+        let initial_theme = &theme::THEMES[theme::theme_index_by_name(&prefs.theme)];
+        let initial_header = viewer::fzf_header_line(initial_theme);
 
-    let mut fzf = Command::new("fzf");
-    fzf.arg("--height").arg("90%");
-    fzf.arg("--preview").arg(&preview_cmd);
-    fzf.arg("--preview-window").arg("right:60%");
-    // Static header showing shortcuts + current theme name.
-    fzf.arg("--header").arg(&initial_header);
-    // ctrl-/ cycles through preview layouts.
-    fzf.arg("--bind")
-        .arg("ctrl-/:change-preview-window(right:60%|up:70%|down:40%|hidden)");
-    // ctrl-n / ctrl-b cycle themes: update prefs, refresh preview, update header.
-    fzf.arg("--bind").arg(format!(
-        "ctrl-n:execute-silent({next_theme_cmd})+refresh-preview+transform-header({header_cmd})"
-    ));
-    fzf.arg("--bind").arg(format!(
-        "ctrl-b:execute-silent({prev_theme_cmd})+refresh-preview+transform-header({header_cmd})"
-    ));
+        let mut fzf = Command::new("fzf");
+        fzf.arg("--height").arg("90%");
+        fzf.arg("--preview").arg(&preview_cmd);
+        fzf.arg("--preview-window").arg("right:60%");
+        // Static header showing shortcuts + current theme name.
+        fzf.arg("--header").arg(&initial_header);
+        // ctrl-/ cycles through preview layouts.
+        fzf.arg("--bind")
+            .arg("ctrl-/:change-preview-window(right:60%|up:70%|down:40%|hidden)");
+        // ctrl-n / ctrl-b cycle themes: update prefs, refresh preview, update header.
+        fzf.arg("--bind").arg(format!(
+            "ctrl-n:execute-silent({next_theme_cmd})+refresh-preview+transform-header({header_cmd})"
+        ));
+        fzf.arg("--bind").arg(format!(
+            "ctrl-b:execute-silent({prev_theme_cmd})+refresh-preview+transform-header({header_cmd})"
+        ));
 
-    // If stdin is piped, fzf inherits it and reads candidates from there.
-    // If stdin is a TTY, fzf uses its built-in file finder.
-    if !std::io::stdin().is_terminal() {
-        fzf.stdin(std::process::Stdio::inherit());
+        // Feed piped candidates, or let fzf use its default file finder.
+        if piped_candidates.is_some() {
+            fzf.stdin(std::process::Stdio::piped());
+        }
+
+        // fzf needs the real TTY for its UI, and writes the selection to stdout.
+        let mut child = fzf
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .context("failed to launch fzf — is it installed? (brew install fzf)")?;
+
+        // If we have buffered candidates, write them to fzf's stdin.
+        if let Some(ref candidates) = piped_candidates
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            use std::io::Write;
+            let _ = stdin.write_all(candidates.as_bytes());
+            // stdin drops here, signalling EOF to fzf.
+        }
+
+        let output = child.wait_with_output().context("fzf process failed")?;
+
+        if !output.status.success() {
+            // fzf exits 1 on Ctrl-C / Esc — not an error, just quit.
+            return Ok(());
+        }
+
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if selected.is_empty() {
+            return Ok(());
+        }
+
+        let file = PathBuf::from(&selected);
+        let raw_content = std::fs::read_to_string(&file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+
+        let is_markdown = highlight::is_markdown_path(&file);
+        let code_lang = if is_markdown {
+            None
+        } else {
+            highlight::lang_for_path(&file)
+        };
+
+        let filename = file.display().to_string();
+        let base_dir = file
+            .canonicalize()
+            .unwrap_or_else(|_| file.clone())
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+        // Open the file in the interactive viewer.  When the user quits,
+        // the loop continues and re-launches fzf.
+        viewer::run(
+            &raw_content,
+            max_scrollback,
+            theme,
+            &filename,
+            &base_dir,
+            None,
+            code_lang.as_deref(),
+        )?;
     }
-
-    // fzf needs the real TTY for its UI, and writes the selection to stdout.
-    let output = fzf
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("failed to launch fzf — is it installed? (brew install fzf)")?
-        .wait_with_output()
-        .context("fzf process failed")?;
-
-    if !output.status.success() {
-        // fzf exits 1 on Ctrl-C / Esc — not an error, just quit silently.
-        return Ok(());
-    }
-
-    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if selected.is_empty() {
-        return Ok(());
-    }
-
-    let file = PathBuf::from(&selected);
-    let raw_content = std::fs::read_to_string(&file)
-        .with_context(|| format!("failed to read {}", file.display()))?;
-
-    let is_markdown = highlight::is_markdown_path(&file);
-    let code_lang = if is_markdown {
-        None
-    } else {
-        highlight::lang_for_path(&file)
-    };
-
-    let filename = file.display().to_string();
-    let base_dir = file
-        .canonicalize()
-        .unwrap_or_else(|_| file.clone())
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-
-    viewer::run(
-        &raw_content,
-        max_scrollback,
-        theme,
-        &filename,
-        &base_dir,
-        None,
-        code_lang.as_deref(),
-    )
 }
 
 /// Escape a path for use inside a shell command string.
