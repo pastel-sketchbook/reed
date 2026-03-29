@@ -9,14 +9,19 @@ use libghostty_vt::{RenderState, Terminal};
 pub enum Action {
     Continue,
     Quit,
-    Resize(u16),
+    Resize(u16, u16),
+    NextTheme,
+    PrevTheme,
 }
 
 /// Poll for one input event and update terminal state accordingly.
+///
+/// `content_rows` is the number of visible content rows (excluding header/footer)
+/// used for page-up/down calculations.
 pub fn poll<'a>(
     term: &mut Terminal<'a, 'a>,
     _render: &mut RenderState<'a>,
-    rows: u16,
+    content_rows: u16,
 ) -> Result<Action> {
     if !event::poll(Duration::from_millis(16))? {
         return Ok(Action::Continue);
@@ -27,6 +32,10 @@ pub fn poll<'a>(
             // Quit
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return Ok(Action::Quit),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Action::Quit),
+
+            // Theme cycling
+            (KeyCode::Char('t'), KeyModifiers::NONE) => return Ok(Action::NextTheme),
+            (KeyCode::Char('T'), KeyModifiers::SHIFT) => return Ok(Action::PrevTheme),
 
             // Scroll down
             (KeyCode::Down | KeyCode::Char('j'), _) => {
@@ -40,20 +49,20 @@ pub fn poll<'a>(
 
             // Page down
             (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
-                term.scroll_viewport(ScrollViewport::Delta(rows as isize));
+                term.scroll_viewport(ScrollViewport::Delta(content_rows as isize));
             }
 
             // Page up
             (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
-                term.scroll_viewport(ScrollViewport::Delta(-(rows as isize)));
+                term.scroll_viewport(ScrollViewport::Delta(-(content_rows as isize)));
             }
 
             // Half-page down / up
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                term.scroll_viewport(ScrollViewport::Delta((rows / 2) as isize));
+                term.scroll_viewport(ScrollViewport::Delta((content_rows / 2) as isize));
             }
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                term.scroll_viewport(ScrollViewport::Delta(-((rows / 2) as isize)));
+                term.scroll_viewport(ScrollViewport::Delta(-((content_rows / 2) as isize)));
             }
 
             // Top / bottom
@@ -66,15 +75,14 @@ pub fn poll<'a>(
 
             // Space = page down (like less/man)
             (KeyCode::Char(' '), _) => {
-                term.scroll_viewport(ScrollViewport::Delta(rows as isize));
+                term.scroll_viewport(ScrollViewport::Delta(content_rows as isize));
             }
 
             _ => {}
         },
 
         Event::Resize(new_cols, new_rows) => {
-            term.resize(new_cols, new_rows, 0, 0)?;
-            return Ok(Action::Resize(new_rows));
+            return Ok(Action::Resize(new_cols, new_rows));
         }
 
         _ => {}
