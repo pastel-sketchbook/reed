@@ -73,6 +73,54 @@ pub fn print_to_stdout(markdown: &str) -> Result<()> {
     Ok(())
 }
 
+/// Preview mode: themed ANSI output to stdout for fzf --preview and piping.
+///
+/// Respects `FZF_PREVIEW_COLUMNS` / `FZF_PREVIEW_LINES` for width/height.
+/// When `start_line` is set, output begins at that 1-indexed line.
+pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usize>) -> Result<()> {
+    // Resolve theme.
+    let prefs = config::load_preferences();
+    let name = theme_name.unwrap_or(&prefs.theme);
+    let theme = &theme::THEMES[theme::theme_index_by_name(name)];
+
+    // Determine output width: FZF_PREVIEW_COLUMNS > terminal width > 80.
+    let width = std::env::var("FZF_PREVIEW_COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| terminal::size().ok().map(|(c, _)| c as usize))
+        .unwrap_or(80);
+
+    // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
+    let max_lines = std::env::var("FZF_PREVIEW_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+
+    let skin = theme::build_skin(theme);
+    let joined = join_paragraphs(markdown);
+    let rendered = skin.text(&joined, Some(width)).to_string();
+
+    // Split into lines, optionally skip to start_line, optionally limit count.
+    let lines: Vec<&str> = rendered.lines().collect();
+    let skip = start_line.unwrap_or(1).saturating_sub(1);
+    let iter = lines.iter().skip(skip);
+
+    let mut stdout = io::stdout().lock();
+    match max_lines {
+        Some(limit) => {
+            for line in iter.take(limit) {
+                writeln!(stdout, "{line}")?;
+            }
+        }
+        None => {
+            for line in iter {
+                writeln!(stdout, "{line}")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// What caused the inner render loop to exit.
 enum LoopExit {
     Quit,
@@ -80,6 +128,8 @@ enum LoopExit {
     PrevTheme,
     /// Terminal was resized — must re-create VT with new dimensions.
     Resize(u16, u16),
+    /// Jump to a specific line (from fzf heading navigation).
+    GotoLine(usize),
 }
 
 /// Run the interactive markdown viewer loop.
@@ -90,6 +140,7 @@ pub fn run(
     initial_theme: Option<&str>,
     filename: &str,
     base_dir: &Path,
+    initial_line: Option<usize>,
 ) -> Result<()> {
     if !io::stdout().is_terminal() {
         return print_to_stdout(markdown);
@@ -135,6 +186,13 @@ pub fn run(
         } else {
             Vec::new()
         };
+
+        // Extract headings once for fzf navigation (the `s` key).
+        let headings = input::extract_headings(markdown);
+
+        // Mutable scroll target — set by --line flag or fzf heading jump.
+        // Consumed on first use, then reset to None.
+        let mut goto_line = initial_line;
 
         loop {
             let theme = &theme::THEMES[theme_index];
@@ -208,6 +266,16 @@ pub fn run(
             .context("failed to create libghostty-vt terminal")?;
             term.vt_write(ansi_text.as_bytes());
 
+            // Apply initial scroll position (--line flag or heading jump).
+            if let Some(line) = goto_line.take() {
+                // line is 1-indexed; scroll to put that line at the top.
+                let delta = line.saturating_sub(1) as isize;
+                if delta > 0 {
+                    use libghostty_vt::terminal::ScrollViewport;
+                    term.scroll_viewport(ScrollViewport::Delta(delta));
+                }
+            }
+
             // Allocate render iterators (reused every frame).
             let mut render_state = RenderState::new().context("failed to create render state")?;
             let mut row_it = RowIterator::new().context("failed to create row iterator")?;
@@ -226,6 +294,7 @@ pub fn run(
                 theme,
                 filename,
                 &all_placements,
+                &headings,
             )? {
                 LoopExit::Quit => break,
                 LoopExit::NextTheme => {
@@ -240,6 +309,9 @@ pub fn run(
                 LoopExit::Resize(new_cols, new_rows) => {
                     cols = new_cols;
                     rows = new_rows;
+                }
+                LoopExit::GotoLine(line) => {
+                    goto_line = Some(line);
                 }
             }
         }
@@ -420,6 +492,7 @@ fn run_inner_loop<'a>(
     theme: &Theme,
     filename: &str,
     placements: &[ImagePlacement],
+    headings: &[input::Heading],
 ) -> Result<LoopExit> {
     loop {
         // Begin synchronized update — the terminal buffers everything until
@@ -545,7 +618,7 @@ fn run_inner_loop<'a>(
         stdout.flush()?;
 
         // ── Handle input ─────────────────────────────────────────
-        match input::poll(term, render_state, content_rows)? {
+        match input::poll(term, render_state, content_rows, headings)? {
             input::Action::Continue => {}
             input::Action::Quit => return Ok(LoopExit::Quit),
             input::Action::NextTheme => return Ok(LoopExit::NextTheme),
@@ -553,6 +626,7 @@ fn run_inner_loop<'a>(
             input::Action::Resize(new_cols, new_rows) => {
                 return Ok(LoopExit::Resize(new_cols, new_rows));
             }
+            input::Action::GotoLine(line) => return Ok(LoopExit::GotoLine(line)),
         }
     }
 }
@@ -750,6 +824,9 @@ fn build_key_hints() -> Vec<(HintStyle, &'static str)> {
         (HintStyle::Sep, "\u{2502}"),
         (HintStyle::Key, " g/G "),
         (HintStyle::Desc, "Top/Bot "),
+        (HintStyle::Sep, "\u{2502}"),
+        (HintStyle::Key, " s "),
+        (HintStyle::Desc, "Sections "),
         (HintStyle::Sep, "\u{2502}"),
         (HintStyle::Key, " t/T "),
         (HintStyle::Desc, "Theme "),

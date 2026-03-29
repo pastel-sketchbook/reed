@@ -25,9 +25,18 @@ struct Cli {
     #[arg(long)]
     print: bool,
 
+    /// Preview mode: themed ANSI output to stdout for use with fzf --preview.
+    /// Respects FZF_PREVIEW_COLUMNS and FZF_PREVIEW_LINES if set.
+    #[arg(long)]
+    preview: bool,
+
     /// Initial theme (overrides saved preference). Use `t`/`T` to cycle at runtime.
     #[arg(long)]
     theme: Option<String>,
+
+    /// Scroll to this line number on startup (1-indexed).
+    #[arg(long)]
+    line: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -56,6 +65,8 @@ fn main() -> Result<()> {
 
     if cli.print {
         viewer::print_to_stdout(&markdown)
+    } else if cli.preview {
+        viewer::preview(&markdown, cli.theme.as_deref(), cli.line)
     } else {
         viewer::run(
             &markdown,
@@ -63,6 +74,7 @@ fn main() -> Result<()> {
             cli.theme.as_deref(),
             &filename,
             &base_dir,
+            cli.line,
         )
     }
 }
