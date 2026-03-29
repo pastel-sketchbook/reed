@@ -144,7 +144,10 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
 
     let mut fzf = Command::new("fzf");
     fzf.arg("--preview").arg(&preview_cmd);
-    fzf.arg("--preview-window").arg("right:60%");
+    fzf.arg("--preview-window").arg("up:70%");
+    // ctrl-/ cycles through preview layouts.
+    fzf.arg("--bind")
+        .arg("ctrl-/:change-preview-window(up:70%|right:60%|down:40%|hidden)");
 
     // If stdin is piped, fzf inherits it and reads candidates from there.
     // If stdin is a TTY, fzf uses its built-in file finder.
