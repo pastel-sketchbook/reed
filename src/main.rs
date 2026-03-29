@@ -215,6 +215,59 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     // Header command: prints the styled shortcuts + theme name line.
     let header_cmd = format!("{} --print-header", shell_escape(&reed_bin));
 
+    // Vendor directories to exclude when the filter is active.
+    const VENDOR_DIRS: &[&str] = &[
+        "node_modules",
+        "vendor",
+        ".git",
+        "target",
+        "build",
+        "dist",
+        ".next",
+        "__pycache__",
+        ".venv",
+        "venv",
+    ];
+
+    // Detect fd/fdfind once for the vendor-filter toggle.
+    let fd_bin = if Command::new("fd")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        Some("fd")
+    } else if Command::new("fdfind")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        Some("fdfind")
+    } else {
+        None
+    };
+
+    // Build the two fd commands: filtered (excludes vendor) and unfiltered.
+    let (fd_filtered, fd_unfiltered) = if let Some(bin) = fd_bin {
+        let excludes: String = VENDOR_DIRS
+            .iter()
+            .map(|d| format!(" --exclude {d}"))
+            .collect();
+        (
+            format!("{bin} --type f --hidden{excludes}"),
+            format!("{bin} --type f --hidden"),
+        )
+    } else {
+        // Fallback: use find (no vendor filtering without fd).
+        let cmd = "find . -type f".to_string();
+        (cmd.clone(), cmd)
+    };
+
     loop {
         // Build the initial header from current preferences (may have changed
         // via theme cycling in the previous iteration).
@@ -238,6 +291,20 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         fzf.arg("--bind").arg(format!(
             "ctrl-b:execute-silent({prev_theme_cmd})+refresh-preview+transform-header({header_cmd})"
         ));
+
+        // ctrl-v: toggle vendor-file filter (only when not using piped candidates).
+        // Uses the prompt text as state: "filtered> " vs "all> ".
+        if piped_candidates.is_none() && fd_bin.is_some() {
+            // Start with vendor dirs filtered out.
+            fzf.arg("--prompt").arg("filtered> ");
+            fzf.arg("--bind").arg(format!(
+                "ctrl-v:transform:[[ {{fzf:prompt}} =~ filtered ]] \
+                 && echo \"change-prompt(all> )+reload({fd_unfiltered})\" \
+                 || echo \"change-prompt(filtered> )+reload({fd_filtered})\""
+            ));
+            // Use the filtered command as the initial source.
+            fzf.env("FZF_DEFAULT_COMMAND", &fd_filtered);
+        }
 
         // Feed piped candidates, or let fzf use its default file finder.
         if piped_candidates.is_some() {
@@ -290,18 +357,48 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
 
-        // Open the file in the interactive viewer.  When the user quits,
-        // the loop continues and re-launches fzf.
-        viewer::run(
-            &raw_content,
-            max_scrollback,
-            theme,
-            &filename,
-            &base_dir,
-            None,
-            code_lang.as_deref(),
-        )?;
+        // Code files: open in nvim if available, otherwise fall back to
+        // the built-in viewer.  Markdown always uses the built-in viewer.
+        if code_lang.is_some() && has_nvim() {
+            open_in_nvim(&file)?;
+        } else {
+            viewer::run(
+                &raw_content,
+                max_scrollback,
+                theme,
+                &filename,
+                &base_dir,
+                None,
+                code_lang.as_deref(),
+            )?;
+        }
     }
+}
+
+/// Check whether `nvim` is available on `$PATH`.
+fn has_nvim() -> bool {
+    Command::new("nvim")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Open a file in `nvim`.  Blocks until the editor exits.
+fn open_in_nvim(path: &Path) -> Result<()> {
+    let status = Command::new("nvim")
+        .arg(path)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .context("failed to launch nvim")?;
+    if !status.success() {
+        tracing::warn!("nvim exited with status {status}");
+    }
+    Ok(())
 }
 
 /// Escape a path for use inside a shell command string.

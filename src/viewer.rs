@@ -65,6 +65,7 @@ pub fn fzf_header_line(theme: &Theme) -> String {
     format!(
         "{accent}{ANSI_BOLD}^n/^b{ANSI_NORMAL} {fg}Theme {muted}{sep}\
          {accent}{ANSI_BOLD} ^/{ANSI_NORMAL} {fg}Layout {muted}{sep}\
+         {accent}{ANSI_BOLD} ^v{ANSI_NORMAL} {fg}Vendor\n\
          {accent}{ANSI_BOLD} enter{ANSI_NORMAL} {fg}Open\
          {heading}  [{}]{ANSI_RESET}",
         theme.name,

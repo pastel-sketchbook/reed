@@ -17,6 +17,10 @@ entirely and use syntect for direct syntax highlighting.
 - **Mermaid diagrams** rendered to inline images when `mmdc` is on PATH
 - **fzf integration** -- run `reed` with no arguments to get an interactive
   file picker with live preview; pipe a file list to narrow candidates
+- **nvim integration** -- code files open in `nvim` when installed; Markdown
+  always uses the built-in viewer
+- **Vendor filter** -- toggle vendor/generated directories (`node_modules`,
+  `target`, `.git`, etc.) in the fzf picker with `Ctrl-v` (requires `fd`)
 - **Scrollback navigation** -- PgUp/PgDn, Home/End, arrow keys, `j`/`k`
 - **Fuzzy heading jump** -- press `s` to search headings via fzf
 - **Theme persistence** -- saved to `~/.config/reed/preferences.toml`
@@ -69,10 +73,11 @@ reed --theme "Gruvbox" <file>  # override saved theme
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Open file in viewer |
+| `Enter` | Open file in viewer (or nvim for code files) |
 | `Ctrl-/` | Cycle preview layout |
 | `Ctrl-n` | Next theme |
 | `Ctrl-b` | Previous theme |
+| `Ctrl-v` | Toggle vendor file filter (requires `fd`) |
 
 ## Themes
 
