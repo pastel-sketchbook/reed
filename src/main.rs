@@ -1,6 +1,7 @@
 mod config;
 mod images;
 mod input;
+mod mermaid;
 mod theme;
 mod viewer;
 

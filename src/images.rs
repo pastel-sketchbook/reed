@@ -234,7 +234,62 @@ pub fn load_image(
     Some((png_bytes, display_cols, display_rows.max(1)))
 }
 
+/// Load an image from in-memory bytes (e.g. a PNG rendered by mmdc),
+/// resize it to fit within `max_cols` terminal columns (preserving aspect
+/// ratio), and return re-encoded PNG bytes along with display dimensions
+/// in terminal cells.
+///
+/// Returns `None` if the bytes cannot be decoded as a valid image.
+pub fn load_image_from_bytes(
+    data: &[u8],
+    max_cols: u16,
+    cell_w: u16,
+    cell_h: u16,
+) -> Option<(Vec<u8>, u16, u16)> {
+    let img = match image::load_from_memory(data) {
+        Ok(img) => img,
+        Err(e) => {
+            warn!(error = %e, "failed to load image from bytes");
+            return None;
+        }
+    };
+
+    let (orig_w, orig_h) = img.dimensions();
+    if orig_w == 0 || orig_h == 0 {
+        return None;
+    }
+
+    // Maximum pixel width = max_cols * cell_width_px.
+    let max_px_w = max_cols as u32 * cell_w as u32;
+
+    // Scale down if wider than terminal, preserving aspect ratio.
+    let (target_w, target_h) = if orig_w > max_px_w {
+        let scale = max_px_w as f64 / orig_w as f64;
+        let h = (orig_h as f64 * scale).round() as u32;
+        (max_px_w, h.max(1))
+    } else {
+        (orig_w, orig_h)
+    };
+
+    let resized = img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
+
+    // Re-encode as PNG.
+    let mut png_bytes = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut png_bytes);
+    if let Err(e) = resized.write_to(&mut cursor, image::ImageFormat::Png) {
+        warn!(error = %e, "failed to re-encode image as PNG");
+        return None;
+    }
+
+    // Compute display dimensions in cells.
+    let display_cols = (target_w as f64 / cell_w as f64).ceil() as u16;
+    let display_rows = (target_h as f64 / cell_h as f64).ceil() as u16;
+
+    Some((png_bytes, display_cols, display_rows.max(1)))
+}
+
 /// Build `ImagePlacement` entries for all extractable images.
+#[allow(dead_code)]
 pub fn prepare_placements(
     images: &[ImageRef],
     content_rows: &[usize],

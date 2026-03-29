@@ -18,6 +18,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config;
 use crate::images::{self, ImagePlacement};
 use crate::input;
+use crate::mermaid;
 use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
@@ -81,6 +82,9 @@ pub fn run(
         let image_refs = images::extract_images(markdown, base_dir);
         let (cell_w, cell_h) = images::cell_size_px();
 
+        // Extract mermaid blocks once from the original markdown.
+        let mermaid_blocks = mermaid::extract_mermaid_blocks(markdown);
+
         loop {
             let theme = &theme::THEMES[theme_index];
 
@@ -102,51 +106,31 @@ pub fn run(
             let content_rows = rows.saturating_sub(2).max(1);
             let inner_cols = cols.saturating_sub(2 * SIDE_PAD).max(1);
 
-            // --- Image pre-processing ---
-            // Estimate how many rows each image needs, then replace image
-            // lines with blank placeholders so the VT reserves space.
-            let image_row_counts: Vec<u16> = image_refs
+            // --- Render mermaid diagrams to PNG (theme-aware) ---
+            // Each entry: (block_index, png_data). Blocks that fail to render
+            // are omitted and will be shown as regular code blocks.
+            let rendered_mermaids: Vec<(usize, Vec<u8>)> = mermaid_blocks
                 .iter()
-                .map(|img| images::estimate_image_rows(&img.path, inner_cols, cell_w, cell_h))
+                .enumerate()
+                .filter_map(|(i, block)| {
+                    mermaid::render_to_png(&block.source, theme.bg).map(|png| (i, png))
+                })
                 .collect();
 
-            let (processed_md, placeholder_rows) = if image_refs.is_empty() {
-                (markdown.to_string(), Vec::new())
-            } else {
-                // Use per-image row counts for placeholders.
-                let mut content_row_offsets = Vec::new();
-                let lines: Vec<&str> = markdown.lines().collect();
-                let image_line_set: std::collections::HashSet<usize> =
-                    image_refs.iter().map(|r| r.source_line).collect();
-
-                let mut output = String::with_capacity(markdown.len());
-                let mut output_line_count: usize = 0;
-
-                for (idx, &line) in lines.iter().enumerate() {
-                    if image_line_set.contains(&idx) {
-                        // Find which image this is.
-                        let img_idx = image_refs
-                            .iter()
-                            .position(|r| r.source_line == idx)
-                            .unwrap();
-                        content_row_offsets.push(output_line_count);
-                        let row_count = image_row_counts[img_idx];
-                        for _ in 0..row_count {
-                            output.push('\n');
-                            output_line_count += 1;
-                        }
-                    } else {
-                        output.push_str(line);
-                        output.push('\n');
-                        output_line_count += 1;
-                    }
-                }
-
-                if !markdown.ends_with('\n') && output.ends_with('\n') {
-                    output.pop();
-                }
-                (output, content_row_offsets)
-            };
+            // --- Build unified replacement map ---
+            // A "replacement" is a line range in the original markdown that
+            // should be replaced with blank placeholder rows for an image.
+            // Both `![alt](path)` images and successfully-rendered mermaid
+            // blocks produce replacements.
+            let (processed_md, all_placements) = build_processed_markdown(
+                markdown,
+                &image_refs,
+                &mermaid_blocks,
+                &rendered_mermaids,
+                inner_cols,
+                cell_w,
+                cell_h,
+            );
 
             // Build themed skin and render markdown → ANSI.
             let skin = theme::build_skin(theme);
@@ -163,15 +147,6 @@ pub fn run(
             // (ANSI escape codes followed by \r\n with no printable text).
             // Strip it so content starts immediately below the header bar.
             let ansi_text = strip_leading_blank_lines(&ansi_text);
-
-            // Load and prepare image placements for rendering.
-            let placements = images::prepare_placements(
-                &image_refs,
-                &placeholder_rows,
-                inner_cols,
-                cell_w,
-                cell_h,
-            );
 
             // Create the virtual terminal and feed rendered content.
             let mut term = Terminal::new(TerminalOptions {
@@ -199,7 +174,7 @@ pub fn run(
                 cols,
                 theme,
                 filename,
-                &placements,
+                &all_placements,
             )? {
                 LoopExit::Quit => break,
                 LoopExit::NextTheme => {
@@ -226,6 +201,151 @@ pub fn run(
     let _ = terminal::disable_raw_mode();
 
     result
+}
+
+// ── Unified markdown pre-processing ──────────────────────────────
+
+/// A line range in the original markdown to replace with placeholder rows.
+struct Replacement {
+    /// First line of the range (inclusive).
+    start_line: usize,
+    /// Last line of the range (inclusive).
+    end_line: usize,
+    /// Number of blank placeholder rows to insert.
+    placeholder_rows: u16,
+    /// Pre-loaded PNG data for this replacement (if available).
+    png_data: Option<Vec<u8>>,
+    /// Display dimensions in terminal cells.
+    display_cols: u16,
+    display_rows: u16,
+    /// Alt text / label.
+    alt: String,
+}
+
+/// Build the processed markdown with image and mermaid placeholders, and
+/// return the resulting `ImagePlacement` entries for Kitty rendering.
+fn build_processed_markdown(
+    markdown: &str,
+    image_refs: &[images::ImageRef],
+    mermaid_blocks: &[mermaid::MermaidBlock],
+    rendered_mermaids: &[(usize, Vec<u8>)],
+    inner_cols: u16,
+    cell_w: u16,
+    cell_h: u16,
+) -> (String, Vec<ImagePlacement>) {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut replacements = Vec::new();
+
+    // --- Image replacements (single-line each) ---
+    for img in image_refs {
+        let row_count = images::estimate_image_rows(&img.path, inner_cols, cell_w, cell_h);
+
+        // Try to load the image now.
+        let loaded = images::load_image(&img.path, inner_cols, cell_w, cell_h);
+        let (png_data, display_cols, display_rows) = match loaded {
+            Some((data, c, r)) => (Some(data), c, r),
+            None => (None, 0, row_count),
+        };
+
+        replacements.push(Replacement {
+            start_line: img.source_line,
+            end_line: img.source_line,
+            placeholder_rows: row_count,
+            png_data,
+            display_cols,
+            display_rows,
+            alt: img.alt.clone(),
+        });
+    }
+
+    // --- Mermaid replacements (multi-line each) ---
+    for &(block_idx, ref png_data) in rendered_mermaids {
+        let block = &mermaid_blocks[block_idx];
+
+        // Determine display size from the rendered PNG.
+        let (display_cols, display_rows, placeholder_rows) =
+            match images::load_image_from_bytes(png_data, inner_cols, cell_w, cell_h) {
+                Some((_, c, r)) => (c, r, r),
+                None => continue, // skip if we can't determine dimensions
+            };
+
+        replacements.push(Replacement {
+            start_line: block.fence_start_line,
+            end_line: block.fence_end_line,
+            placeholder_rows,
+            png_data: Some(png_data.clone()),
+            display_cols,
+            display_rows,
+            alt: String::from("mermaid diagram"),
+        });
+    }
+
+    // Sort replacements by start_line so we process them in order.
+    replacements.sort_by_key(|r| r.start_line);
+
+    // If no replacements, return markdown unchanged.
+    if replacements.is_empty() {
+        return (markdown.to_string(), Vec::new());
+    }
+
+    // Build processed markdown and placements.
+    let mut output = String::with_capacity(markdown.len());
+    let mut placements = Vec::new();
+    let mut output_line_count: usize = 0;
+    let mut repl_idx = 0;
+    let mut skip_until: Option<usize> = None;
+
+    for (idx, &line) in lines.iter().enumerate() {
+        // Skip lines that are part of a multi-line replacement.
+        if let Some(end) = skip_until {
+            if idx <= end {
+                continue;
+            }
+            skip_until = None;
+        }
+
+        if repl_idx < replacements.len() && idx == replacements[repl_idx].start_line {
+            let repl = &replacements[repl_idx];
+
+            // Record the output line where this placeholder starts.
+            let content_row = output_line_count;
+
+            // Insert blank placeholder lines.
+            for _ in 0..repl.placeholder_rows {
+                output.push('\n');
+                output_line_count += 1;
+            }
+
+            // Create placement if we have PNG data.
+            if let Some(ref png_data) = repl.png_data {
+                placements.push(ImagePlacement {
+                    png_data: png_data.clone(),
+                    content_row,
+                    cols: repl.display_cols,
+                    rows: repl.display_rows,
+                    alt: repl.alt.clone(),
+                });
+            }
+
+            // Skip remaining lines of multi-line replacements.
+            if repl.end_line > repl.start_line {
+                skip_until = Some(repl.end_line);
+            }
+
+            repl_idx += 1;
+        } else {
+            output.push_str(line);
+            output.push('\n');
+            output_line_count += 1;
+        }
+    }
+
+    // Preserve trailing newline behavior.
+    if !markdown.ends_with('\n') && output.ends_with('\n') {
+        output.pop();
+    }
+
+    (output, placements)
 }
 
 /// Persist the current theme choice to disk (best-effort).
@@ -940,5 +1060,132 @@ mod tests {
         let input = "1. first\n2. second\nPlain.\n";
         let result = join_paragraphs(input);
         assert_eq!(result, "1. first\n2. second\nPlain.\n");
+    }
+
+    // ── build_processed_markdown tests ───────────────────────────
+
+    /// Create a tiny valid 1x1 red PNG for testing.
+    fn tiny_png() -> Vec<u8> {
+        use image::{ImageBuffer, Rgba};
+        let img = ImageBuffer::from_pixel(1, 1, Rgba([255u8, 0, 0, 255]));
+        let mut buf = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        buf
+    }
+
+    #[test]
+    fn build_processed_md_no_replacements() {
+        let md = "# Hello\n\nSome text.\n";
+        let (result, placements) = build_processed_markdown(
+            md,
+            &[], // no images
+            &[], // no mermaid blocks
+            &[], // no rendered mermaids
+            80,
+            8,
+            16,
+        );
+        assert_eq!(result, md);
+        assert!(placements.is_empty());
+    }
+
+    #[test]
+    fn build_processed_md_image_replacement() {
+        // Markdown with one image line. Since the image file doesn't exist,
+        // load_image returns None, so we get a placeholder with no PNG data
+        // and thus no placement entry.
+        let md = "# Title\n\n![photo](nonexistent.png)\n\nMore text.\n";
+        let image_refs = images::extract_images(md, std::path::Path::new("/tmp"));
+        assert_eq!(image_refs.len(), 1);
+
+        let (result, placements) = build_processed_markdown(md, &image_refs, &[], &[], 80, 8, 16);
+
+        // The image line should have been replaced with placeholder blank line(s).
+        assert!(!result.contains("![photo]"));
+        // No placement because the image file doesn't exist.
+        assert!(placements.is_empty());
+    }
+
+    #[test]
+    fn build_processed_md_mermaid_replacement() {
+        let md = "# Title\n\n```mermaid\ngraph TD\n    A --> B\n```\n\nMore text.\n";
+        let mermaid_blocks = mermaid::extract_mermaid_blocks(md);
+        assert_eq!(mermaid_blocks.len(), 1);
+
+        // Provide a pre-rendered PNG for block index 0.
+        let png = tiny_png();
+        let rendered = vec![(0usize, png)];
+
+        let (result, placements) =
+            build_processed_markdown(md, &[], &mermaid_blocks, &rendered, 80, 8, 16);
+
+        // The mermaid fenced block should be replaced with placeholder lines.
+        assert!(
+            !result.contains("```mermaid"),
+            "mermaid fence should be removed"
+        );
+        assert!(
+            !result.contains("graph TD"),
+            "mermaid source should be removed"
+        );
+        // We should have one placement for the diagram.
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].alt, "mermaid diagram");
+        // The text before and after should be preserved.
+        assert!(result.contains("# Title"));
+        assert!(result.contains("More text."));
+    }
+
+    #[test]
+    fn build_processed_md_mermaid_fallback_no_render() {
+        // When no rendered mermaids are provided, the mermaid block stays as-is.
+        let md = "```mermaid\ngraph TD\n    A --> B\n```\n";
+        let mermaid_blocks = mermaid::extract_mermaid_blocks(md);
+        assert_eq!(mermaid_blocks.len(), 1);
+
+        let (result, placements) = build_processed_markdown(
+            md,
+            &[],
+            &mermaid_blocks,
+            &[], // no renders — fallback to code block
+            80,
+            8,
+            16,
+        );
+
+        // Should be unchanged — mermaid source preserved as code block.
+        assert_eq!(result, md);
+        assert!(placements.is_empty());
+    }
+
+    #[test]
+    fn build_processed_md_mixed_image_and_mermaid() {
+        let md = "\
+![photo](fake.png)\n\
+\n\
+```mermaid\n\
+graph LR\n\
+    X --> Y\n\
+```\n\
+\n\
+End.\n";
+
+        let image_refs = images::extract_images(md, std::path::Path::new("/tmp"));
+        let mermaid_blocks = mermaid::extract_mermaid_blocks(md);
+
+        let png = tiny_png();
+        let rendered = vec![(0usize, png)];
+
+        let (result, placements) =
+            build_processed_markdown(md, &image_refs, &mermaid_blocks, &rendered, 80, 8, 16);
+
+        // Image line and mermaid block should both be replaced.
+        assert!(!result.contains("![photo]"));
+        assert!(!result.contains("```mermaid"));
+        assert!(!result.contains("graph LR"));
+        // One placement for mermaid (image file doesn't exist, so no image placement).
+        assert_eq!(placements.len(), 1);
+        assert!(result.contains("End."));
     }
 }
