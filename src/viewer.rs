@@ -12,7 +12,7 @@ use crossterm::{
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use termimad::MadSkin;
-use tracing::warn;
+use tracing::{debug, warn};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config;
@@ -23,6 +23,45 @@ use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
 
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
+
+/// Check whether the terminal likely supports the Kitty graphics protocol.
+///
+/// Returns `false` for terminals known not to support it (tmux, screen, etc.)
+/// so we can fall back to showing raw code blocks / alt text instead of
+/// emitting Kitty escape sequences that would produce garbage.
+fn kitty_graphics_supported() -> bool {
+    // TERM_PROGRAM is set by many terminal emulators.
+    if let Ok(prog) = std::env::var("TERM_PROGRAM") {
+        let lc = prog.to_ascii_lowercase();
+        if lc.contains("kitty")
+            || lc.contains("wezterm")
+            || lc.contains("ghostty")
+            || lc.contains("konsole")
+        {
+            return true;
+        }
+    }
+
+    // Inside tmux / screen the Kitty protocol is not forwarded.
+    if let Ok(term) = std::env::var("TERM") {
+        let lc = term.to_ascii_lowercase();
+        if lc.starts_with("tmux") || lc.starts_with("screen") {
+            debug!(TERM = %term, "Kitty graphics disabled (multiplexer detected)");
+            return false;
+        }
+    }
+
+    // TMUX env var is set when running inside tmux, even if TERM was overridden.
+    if std::env::var_os("TMUX").is_some() {
+        debug!("Kitty graphics disabled (TMUX env var present)");
+        return false;
+    }
+
+    // Fallback: assume support unless we detected a known blocker above.
+    // This is optimistic but avoids false negatives for lesser-known
+    // Kitty-capable terminals.
+    true
+}
 
 /// Print rendered markdown to stdout (non-interactive, no TTY required).
 pub fn print_to_stdout(markdown: &str) -> Result<()> {
@@ -79,11 +118,23 @@ pub fn run(
         )?;
 
         // Extract image references once from the original markdown.
-        let image_refs = images::extract_images(markdown, base_dir);
+        // Only process images/mermaid if the terminal supports Kitty graphics.
+        let has_kitty = kitty_graphics_supported();
+        let image_refs = if has_kitty {
+            images::extract_images(markdown, base_dir)
+        } else {
+            Vec::new()
+        };
         let (cell_w, cell_h) = images::cell_size_px();
 
         // Extract mermaid blocks once from the original markdown.
-        let mermaid_blocks = mermaid::extract_mermaid_blocks(markdown);
+        // When Kitty is unsupported, leave mermaid_blocks empty so the
+        // fenced code blocks pass through to termimad as-is (fallback).
+        let mermaid_blocks = if has_kitty {
+            mermaid::extract_mermaid_blocks(markdown)
+        } else {
+            Vec::new()
+        };
 
         loop {
             let theme = &theme::THEMES[theme_index];
@@ -371,6 +422,11 @@ fn run_inner_loop<'a>(
     placements: &[ImagePlacement],
 ) -> Result<LoopExit> {
     loop {
+        // Begin synchronized update — the terminal buffers everything until
+        // the matching end marker, then renders the frame atomically.
+        // This prevents flicker/blink when deleting + re-emitting images.
+        queue!(stdout, terminal::BeginSynchronizedUpdate)?;
+
         // ── Draw header (row 0) ──────────────────────────────────
         draw_header(stdout, cols, theme, filename)?;
 
@@ -475,12 +531,17 @@ fn run_inner_loop<'a>(
 
         // ── Emit Kitty graphics for visible images ───────────────
         if !placements.is_empty() {
+            // Delete all previously placed Kitty images to prevent ghost
+            // artifacts when scrolling.  q=2 suppresses terminal responses.
+            write!(stdout, "\x1b_Ga=d,q=2;\x1b\\")?;
             emit_visible_images(stdout, term, placements, content_rows)?;
         }
 
         // ── Draw footer (last row) ──────────────────────────────
         draw_footer(stdout, content_rows + 1, cols, theme)?;
 
+        // End synchronized update — terminal renders the complete frame now.
+        queue!(stdout, terminal::EndSynchronizedUpdate)?;
         stdout.flush()?;
 
         // ── Handle input ─────────────────────────────────────────
@@ -533,8 +594,9 @@ fn emit_visible_images(
         };
 
         // Position cursor at the image location (left padding + content area).
+        // NOTE: no flush here — everything stays buffered until the single
+        // frame-end flush so delete + re-emit is atomic (no blink).
         queue!(stdout, cursor::MoveTo(SIDE_PAD, screen_row + 1))?;
-        stdout.flush()?;
 
         // Emit the Kitty graphics protocol escape sequence.
         images::emit_kitty_image(stdout, &placement.png_data, placement.cols, placement.rows)?;
