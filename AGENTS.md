@@ -13,10 +13,19 @@ This is a Rust 2024-edition project. Use `cargo` for all build/test/run tasks.
 
 - `cargo build` to compile (requires Zig 0.15.x on PATH).
 - `cargo run -- <file.md>` to view a markdown file.
+- `cargo run` (no args) to launch the fzf file picker with preview.
 - `cargo test` to run unit tests.
 - `cargo clippy` for lints.
 - `cargo fmt` to format code.
 - On macOS: prefix with `DYLD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1))`.
+
+## Install (macOS / Apple Silicon)
+
+```sh
+cargo build --release
+cp target/release/reed ~/bin/reed
+codesign -f -s - ~/bin/reed    # REQUIRED: cp invalidates ad-hoc signature
+```
 
 ## Dependencies
 

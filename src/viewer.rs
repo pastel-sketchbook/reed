@@ -25,6 +25,20 @@ use crate::theme::{self, Theme, MIN_TERM_HEIGHT, MIN_TERM_WIDTH};
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
 
+/// Return the ANSI escape to set the background color, or empty string for
+/// `Color::Reset` (transparent / terminal default).
+fn ansi_bg(color: Color) -> String {
+    match color {
+        Color::Rgb { r, g, b } => format!("\x1b[48;2;{r};{g};{b}m"),
+        _ => String::new(),
+    }
+}
+
+/// ANSI escape: clear from cursor to end of line (fills with current bg).
+const ANSI_CLEAR_EOL: &str = "\x1b[K";
+/// ANSI escape: reset all attributes.
+const ANSI_RESET: &str = "\x1b[0m";
+
 /// Check whether the terminal likely supports the Kitty graphics protocol.
 ///
 /// Returns `false` for terminals known not to support it (tmux, screen, etc.)
@@ -148,20 +162,27 @@ pub fn preview_code(
         .and_then(|l| highlight::highlight_code(source, l, theme.bg))
         .unwrap_or_else(|| source.to_string());
 
+    // Apply theme background: set bg color, print text, clear to EOL.
+    let bg = ansi_bg(theme.bg);
+
     let lines: Vec<&str> = highlighted.lines().collect();
     let skip = start_line.unwrap_or(1).saturating_sub(1);
     let iter = lines.iter().skip(skip);
 
     let mut stdout = io::stdout().lock();
+    let write_line = |stdout: &mut io::StdoutLock<'_>, line: &str| -> Result<()> {
+        writeln!(stdout, "{bg}{line}{ANSI_CLEAR_EOL}{ANSI_RESET}")?;
+        Ok(())
+    };
     match max_lines {
         Some(limit) => {
             for line in iter.take(limit) {
-                writeln!(stdout, "{line}")?;
+                write_line(&mut stdout, line)?;
             }
         }
         None => {
             for line in iter {
-                writeln!(stdout, "{line}")?;
+                write_line(&mut stdout, line)?;
             }
         }
     }
@@ -284,7 +305,12 @@ pub fn run(
                 // Code file path: syntect → VT terminal (no termimad).
                 let highlighted = highlight::highlight_code(markdown, lang, theme.bg)
                     .unwrap_or_else(|| markdown.to_string());
-                let ansi = highlighted.replace('\n', "\r\n");
+                // Apply theme bg to every line so the VT cells pick it up.
+                let bg = ansi_bg(theme.bg);
+                let ansi: String = highlighted
+                    .lines()
+                    .map(|line| format!("{bg}{line}{ANSI_CLEAR_EOL}{ANSI_RESET}\r\n"))
+                    .collect();
                 (ansi, Vec::new())
             } else {
                 // Markdown path: syntect (inside fences) → termimad → VT.
