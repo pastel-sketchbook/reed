@@ -18,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config;
 use crate::highlight;
-use crate::images::{self, ImagePlacement};
+use crate::images::{self, GraphicsProtocol, ImagePlacement};
 use crate::input;
 use crate::mermaid;
 use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
@@ -74,41 +74,61 @@ pub fn fzf_header_line(theme: &Theme) -> String {
 
 /// Check whether the terminal likely supports the Kitty graphics protocol.
 ///
-/// Returns `false` for terminals known not to support it (tmux, screen, etc.)
-/// so we can fall back to showing raw code blocks / alt text instead of
-/// emitting Kitty escape sequences that would produce garbage.
-fn kitty_graphics_supported() -> bool {
+/// Returns `GraphicsProtocol::None` for terminals known not to support
+/// any graphics, `Kitty` for Kitty-capable terminals, and `Sixel` for
+/// terminals that support Sixel but not Kitty.
+fn detect_graphics_protocol() -> GraphicsProtocol {
+    // Kitty protocol: Ghostty, Kitty, WezTerm, Konsole.
     if config::is_ghostty() {
-        return true;
+        return GraphicsProtocol::Kitty;
     }
 
-    // TERM_PROGRAM is set by many terminal emulators.
     if let Ok(prog) = std::env::var("TERM_PROGRAM") {
         let lc = prog.to_ascii_lowercase();
         if lc.contains("kitty") || lc.contains("wezterm") || lc.contains("konsole") {
-            return true;
+            return GraphicsProtocol::Kitty;
+        }
+        // Sixel-capable terminals.
+        if lc.contains("foot")
+            || lc.contains("mlterm")
+            || lc.contains("mintty")
+            || lc.contains("contour")
+            || lc.contains("ctx")
+        {
+            return GraphicsProtocol::Sixel;
         }
     }
 
-    // Inside tmux / screen the Kitty protocol is not forwarded.
+    // Inside tmux / screen — no graphics protocol is forwarded reliably.
     if let Ok(term) = std::env::var("TERM") {
         let lc = term.to_ascii_lowercase();
         if lc.starts_with("tmux") || lc.starts_with("screen") {
-            debug!(TERM = %term, "Kitty graphics disabled (multiplexer detected)");
-            return false;
+            debug!(TERM = %term, "graphics disabled (multiplexer detected)");
+            return GraphicsProtocol::None;
+        }
+        // xterm with Sixel support (many modern xterms).
+        if lc.contains("xterm") {
+            // xterm may support Sixel; we'll optimistically enable it
+            // if no Kitty-capable terminal was detected.
+            // This is a common path for users in plain xterm.
         }
     }
 
     // TMUX env var is set when running inside tmux, even if TERM was overridden.
     if std::env::var_os("TMUX").is_some() {
-        debug!("Kitty graphics disabled (TMUX env var present)");
-        return false;
+        debug!("graphics disabled (TMUX env var present)");
+        return GraphicsProtocol::None;
     }
 
-    // Fallback: assume support unless we detected a known blocker above.
+    // Check SIXEL_SUPPORT env var (can be set by users to force Sixel).
+    if std::env::var("REED_SIXEL").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        return GraphicsProtocol::Sixel;
+    }
+
+    // Fallback: assume Kitty support unless we detected a known blocker.
     // This is optimistic but avoids false negatives for lesser-known
     // Kitty-capable terminals.
-    true
+    GraphicsProtocol::Kitty
 }
 
 /// Print rendered markdown to stdout (non-interactive, no TTY required).
@@ -128,7 +148,7 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
     // Resolve theme: CLI flag > saved preference (Ghostty-aware) > default.
     let prefs = config::load_preferences();
     let name = config::resolve_theme_name(theme_name, &prefs);
-    let theme = &theme::THEMES[theme::theme_index_by_name(name)];
+    let theme = &theme::ALL_THEMES[theme::theme_index_by_name(name)];
 
     // Determine output width: FZF_PREVIEW_COLUMNS > terminal width > 80.
     let width = std::env::var("FZF_PREVIEW_COLUMNS")
@@ -182,7 +202,7 @@ pub fn preview_code(
 ) -> Result<()> {
     let prefs = config::load_preferences();
     let name = config::resolve_theme_name(theme_name, &prefs);
-    let theme = &theme::THEMES[theme::theme_index_by_name(name)];
+    let theme = &theme::ALL_THEMES[theme::theme_index_by_name(name)];
 
     // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
     let max_lines = std::env::var("FZF_PREVIEW_LINES")
@@ -234,6 +254,122 @@ enum LoopExit {
     /// Force a full redraw (screen was dirtied by an external overlay).
     /// Carries the scroll offset to restore.
     Redraw(usize),
+    /// User initiated a search — requires prompt then redraw.
+    StartSearch,
+    /// Jump to the next search match.
+    NextMatch,
+    /// Jump to the previous search match.
+    PrevMatch,
+    /// Toggle the Table of Contents sidebar.
+    ToggleToc,
+    /// Open link picker.
+    OpenLink,
+    /// File changed on disk — reload content.
+    Reload,
+    /// Switch to the next buffer in the ring.
+    BufferNext,
+    /// Switch to the previous buffer in the ring.
+    BufferPrev,
+    /// Open code block picker for clipboard copy.
+    CopyBlock,
+}
+
+/// What caused the viewer to exit — returned to the caller so it can
+/// decide whether to quit entirely or switch buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerExit {
+    /// User pressed `q` / `Esc` — exit the application.
+    Quit,
+    /// Switch to the next buffer in the ring (`Ctrl-n`).
+    BufferNext,
+    /// Switch to the previous buffer in the ring (`Ctrl-p`).
+    BufferPrev,
+}
+
+/// Persistent search state across inner-loop re-entries.
+struct SearchState {
+    /// The current search query (empty = no active search).
+    query: String,
+    /// VT row numbers (1-indexed) where matches were found.
+    match_rows: Vec<usize>,
+    /// Index into `match_rows` for the current match.
+    current: usize,
+}
+
+impl SearchState {
+    fn new() -> Self {
+        Self {
+            query: String::new(),
+            match_rows: Vec::new(),
+            current: 0,
+        }
+    }
+
+    /// Returns `true` if the query contains any uppercase character (smart-case).
+    fn is_case_sensitive(query: &str) -> bool {
+        query.chars().any(|c| c.is_uppercase())
+    }
+
+    /// Check if `haystack` contains `needle` with smart-case:
+    /// case-sensitive when `needle` has uppercase, case-insensitive otherwise.
+    fn smart_contains(haystack: &str, needle: &str) -> bool {
+        if Self::is_case_sensitive(needle) {
+            haystack.contains(needle)
+        } else {
+            haystack.to_lowercase().contains(&needle.to_lowercase())
+        }
+    }
+
+    /// Rebuild match positions by scanning ANSI text for the query.
+    /// Uses smart-case: case-insensitive by default, case-sensitive when
+    /// the query contains uppercase characters.
+    fn find_matches(&mut self, ansi_text: &str) {
+        self.match_rows.clear();
+        self.current = 0;
+        if self.query.is_empty() {
+            return;
+        }
+        for (i, line) in ansi_text.split("\r\n").enumerate() {
+            let plain = strip_ansi_codes(line);
+            if Self::smart_contains(&plain, &self.query) {
+                self.match_rows.push(i + 1); // 1-indexed
+            }
+        }
+    }
+
+    /// Jump to the next match. Returns the 1-indexed VT row, or `None`.
+    fn next_match(&mut self) -> Option<usize> {
+        if self.match_rows.is_empty() {
+            return None;
+        }
+        self.current = (self.current + 1) % self.match_rows.len();
+        Some(self.match_rows[self.current])
+    }
+
+    /// Jump to the previous match. Returns the 1-indexed VT row, or `None`.
+    fn prev_match(&mut self) -> Option<usize> {
+        if self.match_rows.is_empty() {
+            return None;
+        }
+        self.current = (self.current + self.match_rows.len() - 1) % self.match_rows.len();
+        Some(self.match_rows[self.current])
+    }
+
+    /// Jump to the first match at or after `from_row` (1-indexed).
+    fn first_match_from(&mut self, from_row: usize) -> Option<usize> {
+        if self.match_rows.is_empty() {
+            return None;
+        }
+        for (i, &row) in self.match_rows.iter().enumerate() {
+            if row >= from_row {
+                self.current = i;
+                return Some(row);
+            }
+        }
+        // Wrap around to first match.
+        self.current = 0;
+        Some(self.match_rows[0])
+    }
 }
 
 /// Run the interactive markdown viewer loop.
@@ -242,7 +378,10 @@ enum LoopExit {
 /// When `code_lang` is `Some`, the content is treated as a code file: it is
 /// syntax-highlighted with `syntect` and fed directly to the VT terminal,
 /// bypassing `termimad`. When `None`, the standard markdown pipeline is used.
-#[allow(clippy::too_many_lines)]
+///
+/// When `file_path` is provided, the viewer polls the file's mtime and
+/// automatically reloads content when the file changes on disk.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run(
     markdown: &str,
     max_scrollback: usize,
@@ -251,16 +390,18 @@ pub fn run(
     base_dir: &Path,
     initial_line: Option<usize>,
     code_lang: Option<&str>,
-) -> Result<()> {
+    file_path: Option<&Path>,
+    buffer_info: Option<(usize, usize)>,
+) -> Result<ViewerExit> {
     if !io::stdout().is_terminal() {
         print_to_stdout(markdown);
-        return Ok(());
+        return Ok(ViewerExit::Quit);
     }
 
     let (mut cols, mut rows) = terminal::size().context("no terminal available")?;
     if cols == 0 || rows == 0 {
         print_to_stdout(markdown);
-        return Ok(());
+        return Ok(ViewerExit::Quit);
     }
 
     // Resolve initial theme: CLI flag > saved preference (Ghostty-aware) > default.
@@ -272,7 +413,7 @@ pub fn run(
     terminal::enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
 
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<ViewerExit> {
         execute!(
             stdout,
             terminal::EnterAlternateScreen,
@@ -280,34 +421,57 @@ pub fn run(
             terminal::Clear(ClearType::All)
         )?;
 
-        // Extract image references once from the original markdown.
-        // Only process images/mermaid if the terminal supports Kitty graphics.
-        let has_kitty = kitty_graphics_supported();
-        let image_refs = if has_kitty {
+        // Extract image references from the markdown.
+        // Only process images/mermaid if the terminal supports graphics.
+        let gfx = detect_graphics_protocol();
+        let has_graphics = gfx != GraphicsProtocol::None;
+        let mut image_refs = if has_graphics {
             images::extract_images(markdown, base_dir)
         } else {
             Vec::new()
         };
         let (cell_w, cell_h) = images::cell_size_px();
 
-        // Extract mermaid blocks once from the original markdown.
-        // When Kitty is unsupported, leave mermaid_blocks empty so the
-        // fenced code blocks pass through to termimad as-is (fallback).
-        let mermaid_blocks = if has_kitty {
+        // Extract mermaid blocks from the markdown.
+        // When no graphics protocol is available, leave mermaid_blocks empty
+        // so the fenced code blocks pass through to termimad as-is (fallback).
+        let mut mermaid_blocks = if has_graphics {
             mermaid::extract_mermaid_blocks(markdown)
         } else {
             Vec::new()
         };
 
+        // Track the current markdown content (owned for live reload support).
+        let mut markdown_owned = markdown.to_string();
+
         // Extract headings once for fzf navigation (the `s` key).
-        let headings = input::extract_headings(markdown);
+        let mut headings = input::extract_headings(&markdown_owned);
+
+        // Extract links once for link following (the `l` key).
+        let mut links = input::extract_links(&markdown_owned);
+
+        // Extract code blocks once for clipboard copy (the `c` key).
+        let mut code_blocks = input::extract_code_blocks(&markdown_owned);
 
         // Mutable scroll target — set by --line flag or fzf heading jump.
         // Consumed on first use, then reset to None.
         let mut goto_line = initial_line;
 
+        // Persistent search state across inner-loop re-entries.
+        let mut search = SearchState::new();
+
+        // Table of Contents sidebar visibility.
+        let mut toc_visible = false;
+
+        // File watching: last known mtime.
+        let mut last_mtime: Option<std::time::SystemTime> = file_path
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+
+        let mut viewer_exit = ViewerExit::Quit;
+
         loop {
-            let theme = &theme::THEMES[theme_index];
+            let theme = &theme::ALL_THEMES[theme_index];
 
             // Terminal size guard — show a helpful message if too small.
             if cols < MIN_TERM_WIDTH || rows < MIN_TERM_HEIGHT {
@@ -341,8 +505,8 @@ pub fn run(
             // --- Render content to ANSI text ---
             let (ansi_text, all_placements) = if let Some(lang) = code_lang {
                 // Code file path: syntect → VT terminal (no termimad).
-                let highlighted = highlight::highlight_code(markdown, lang, theme.bg)
-                    .unwrap_or_else(|| markdown.to_string());
+                let highlighted = highlight::highlight_code(&markdown_owned, lang, theme.bg)
+                    .unwrap_or_else(|| markdown_owned.clone());
                 // Apply theme bg to every line so the VT cells pick it up.
                 let bg = ansi_bg(theme.bg);
                 let ansi = highlighted.lines().fold(String::new(), |mut acc, line| {
@@ -354,7 +518,7 @@ pub fn run(
                 // Markdown path: syntect (inside fences) → termimad → VT.
 
                 // --- Syntax-highlight fenced code blocks ---
-                let highlighted_md = highlight::highlight_code_blocks(markdown, theme.bg);
+                let highlighted_md = highlight::highlight_code_blocks(&markdown_owned, theme.bg);
 
                 // --- Build unified replacement map ---
                 let (processed_md, placements) = build_processed_markdown(
@@ -422,14 +586,28 @@ pub fn run(
                 filename,
                 &all_placements,
                 &mapped_headings,
+                &search,
+                toc_visible,
+                file_path,
+                &mut last_mtime,
+                gfx,
+                buffer_info,
             )? {
                 LoopExit::Quit => break,
+                LoopExit::BufferNext => {
+                    viewer_exit = ViewerExit::BufferNext;
+                    break;
+                }
+                LoopExit::BufferPrev => {
+                    viewer_exit = ViewerExit::BufferPrev;
+                    break;
+                }
                 LoopExit::NextTheme => {
-                    theme_index = (theme_index + 1) % theme::THEMES.len();
+                    theme_index = (theme_index + 1) % theme::ALL_THEMES.len();
                     persist_theme(theme_index);
                 }
                 LoopExit::PrevTheme => {
-                    let len = theme::THEMES.len();
+                    let len = theme::ALL_THEMES.len();
                     theme_index = (theme_index + len - 1) % len;
                     persist_theme(theme_index);
                 }
@@ -444,10 +622,94 @@ pub fn run(
                     // Restore scroll position after overlay dirtied the screen.
                     goto_line = Some(scroll_pos + 1); // convert 0-indexed to 1-indexed
                 }
+                LoopExit::StartSearch => {
+                    // Show the `/` prompt on the footer row and collect input.
+                    let footer_row = content_rows + 1;
+                    if let Some(query) = input::search_prompt(
+                        &mut stdout,
+                        footer_row,
+                        cols,
+                        theme.fg,
+                        theme.bg,
+                        theme.accent,
+                    )? {
+                        search.query = query;
+                        search.find_matches(&ansi_text);
+
+                        // Determine the current scroll position to find the
+                        // first match from the visible area.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let scroll_offset =
+                            term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                        let from_row = scroll_offset + 1; // 1-indexed
+
+                        if let Some(row) = search.first_match_from(from_row) {
+                            goto_line = Some(row);
+                        }
+                    }
+                    // No query or Esc — just redraw. The outer loop will
+                    // re-enter run_inner_loop with the current state.
+                }
+                LoopExit::NextMatch => {
+                    if let Some(row) = search.next_match() {
+                        goto_line = Some(row);
+                    }
+                }
+                LoopExit::PrevMatch => {
+                    if let Some(row) = search.prev_match() {
+                        goto_line = Some(row);
+                    }
+                }
+                LoopExit::ToggleToc => {
+                    toc_visible = !toc_visible;
+                    // Preserve scroll position across toggle.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    goto_line = Some(scroll_pos + 1);
+                }
+                LoopExit::OpenLink => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let _ = input::fzf_link_picker(&links);
+                    // Always redraw after overlay.
+                    goto_line = Some(scroll_pos + 1);
+                }
+                LoopExit::CopyBlock => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let _ = input::fzf_code_block_picker(&code_blocks);
+                    // Always redraw after overlay.
+                    goto_line = Some(scroll_pos + 1);
+                }
+                LoopExit::Reload => {
+                    // Re-read file from disk and refresh all derived data.
+                    if let Some(path) = file_path
+                        && let Ok(new_content) = std::fs::read_to_string(path)
+                    {
+                        // Preserve scroll position.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                        goto_line = Some(scroll_pos + 1);
+
+                        markdown_owned = new_content;
+                        headings = input::extract_headings(&markdown_owned);
+                        links = input::extract_links(&markdown_owned);
+                        code_blocks = input::extract_code_blocks(&markdown_owned);
+
+                        // Re-extract images and mermaid blocks.
+                        if has_graphics {
+                            image_refs = images::extract_images(&markdown_owned, base_dir);
+                            mermaid_blocks = mermaid::extract_mermaid_blocks(&markdown_owned);
+                        }
+
+                        // Re-run search on the new content (handled by
+                        // outer loop re-rendering + find_matches).
+                    }
+                }
             }
         }
 
-        Ok(())
+        Ok(viewer_exit)
     })();
 
     // Always restore terminal, even on error.
@@ -605,7 +867,7 @@ fn build_processed_markdown(
 /// Persist the current theme choice to disk (best-effort).
 fn persist_theme(theme_index: usize) {
     let mut prefs = config::load_preferences();
-    config::set_active_theme(&mut prefs, theme::THEMES[theme_index].name);
+    config::set_active_theme(&mut prefs, theme::ALL_THEMES[theme_index].name);
     if let Err(e) = config::save_preferences(&prefs) {
         warn!(error = %e, "failed to save theme preference");
     }
@@ -624,7 +886,14 @@ fn run_inner_loop<'a>(
     filename: &str,
     placements: &[ImagePlacement],
     headings: &[input::Heading],
+    search: &SearchState,
+    toc_visible: bool,
+    file_path: Option<&Path>,
+    last_mtime: &mut Option<std::time::SystemTime>,
+    gfx: GraphicsProtocol,
+    buffer_info: Option<(usize, usize)>,
 ) -> Result<LoopExit> {
+    let mut frame_count: u32 = 0;
     loop {
         // Begin synchronized update — the terminal buffers everything until
         // the matching end marker, then renders the frame atomically.
@@ -632,7 +901,32 @@ fn run_inner_loop<'a>(
         queue!(stdout, terminal::BeginSynchronizedUpdate)?;
 
         // ── Draw header (row 0) ──────────────────────────────────
-        draw_header(stdout, cols, theme, filename)?;
+        draw_header(stdout, cols, theme, filename, buffer_info)?;
+
+        // ── Determine viewport scroll offset ─────────────────────
+        #[allow(clippy::cast_possible_truncation)]
+        let viewport_top = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+
+        // ── Compute TOC layout ───────────────────────────────────
+        let toc_width: u16 = if toc_visible && !headings.is_empty() {
+            // Use 28 columns or 30% of terminal, whichever is smaller,
+            // but at least 20 and leave at least 40 for content.
+            let max_w = (cols * 30 / 100).clamp(20, 34);
+            if cols > max_w + 40 {
+                max_w
+            } else {
+                0 // terminal too narrow, don't show TOC
+            }
+        } else {
+            0
+        };
+
+        // Determine which heading is "current" based on scroll position.
+        let current_heading_idx = if toc_width > 0 {
+            find_current_heading(headings, viewport_top + 1)
+        } else {
+            None
+        };
 
         // ── Draw content (rows 1 .. content_rows) ────────────────
         {
@@ -647,15 +941,46 @@ fn run_inner_loop<'a>(
                     break;
                 }
 
+                // Check if this row contains a search match.
+                // VT rows are 1-indexed: viewport_top + screen_row + 1
+                let vt_row = viewport_top + usize::from(screen_row) + 1;
+                let is_match_row =
+                    !search.query.is_empty() && search.match_rows.binary_search(&vt_row).is_ok();
+                let is_current_match = is_match_row
+                    && search
+                        .match_rows
+                        .get(search.current)
+                        .is_some_and(|&r| r == vt_row);
+
                 // Content starts at terminal row 1 (after header).
                 queue!(stdout, cursor::MoveTo(0, screen_row + 1))?;
 
+                // ── TOC sidebar column (if visible) ──────────────
+                if toc_width > 0 {
+                    draw_toc_cell(
+                        stdout,
+                        headings,
+                        usize::from(screen_row),
+                        usize::from(toc_width),
+                        usize::from(content_rows),
+                        current_heading_idx,
+                        theme,
+                    )?;
+                }
+
                 // Left padding.
+                let row_bg = if is_current_match {
+                    theme.search_current_bg()
+                } else if is_match_row {
+                    theme.search_match_bg()
+                } else {
+                    theme.bg
+                };
                 queue!(
                     stdout,
                     SetAttribute(Attribute::Reset),
                     SetForegroundColor(theme.fg),
-                    SetBackgroundColor(theme.bg),
+                    SetBackgroundColor(row_bg),
                     Print(" ".repeat(usize::from(SIDE_PAD))),
                 )?;
 
@@ -671,6 +996,15 @@ fn run_inner_loop<'a>(
 
                     let fg = fg_rgb.map_or(theme.fg, rgb_to_color);
                     let bg = bg_rgb.map_or(theme.bg, rgb_to_color);
+
+                    // Override background for search-match rows.
+                    let bg = if is_current_match {
+                        theme.search_current_bg()
+                    } else if is_match_row {
+                        theme.search_match_bg()
+                    } else {
+                        bg
+                    };
 
                     let (foreground, background) = if style.inverse { (bg, fg) } else { (fg, bg) };
 
@@ -706,13 +1040,13 @@ fn run_inner_loop<'a>(
                 }
 
                 // Fill remaining inner area + right padding to terminal edge.
-                let filled = usize::from(SIDE_PAD) + usize::from(col_pos);
+                let filled = usize::from(toc_width) + usize::from(SIDE_PAD) + usize::from(col_pos);
                 if filled < usize::from(cols) {
                     queue!(
                         stdout,
                         SetAttribute(Attribute::Reset),
                         SetForegroundColor(theme.fg),
-                        SetBackgroundColor(theme.bg),
+                        SetBackgroundColor(row_bg),
                         Print(" ".repeat(usize::from(cols) - filled)),
                     )?;
                 }
@@ -724,11 +1058,23 @@ fn run_inner_loop<'a>(
             // Fill any remaining content rows with theme background.
             while screen_row < content_rows {
                 queue!(stdout, cursor::MoveTo(0, screen_row + 1))?;
+                // Draw TOC column on empty rows too.
+                if toc_width > 0 {
+                    draw_toc_cell(
+                        stdout,
+                        headings,
+                        usize::from(screen_row),
+                        usize::from(toc_width),
+                        usize::from(content_rows),
+                        current_heading_idx,
+                        theme,
+                    )?;
+                }
                 queue!(
                     stdout,
                     SetForegroundColor(theme.fg),
                     SetBackgroundColor(theme.bg),
-                    Print(" ".repeat(usize::from(cols))),
+                    Print(" ".repeat(usize::from(cols).saturating_sub(usize::from(toc_width)))),
                     ResetColor,
                 )?;
                 screen_row += 1;
@@ -736,22 +1082,47 @@ fn run_inner_loop<'a>(
         }
         // snapshot dropped here — render_state is free for input::poll
 
-        // ── Emit Kitty graphics for visible images ───────────────
+        // ── Emit graphics for visible images ──────────────────────
         if !placements.is_empty() {
-            // Delete all previously placed Kitty images to prevent ghost
-            // artifacts when scrolling.  q=2 suppresses terminal responses.
-            write!(stdout, "\x1b_Ga=d,q=2;\x1b\\")?;
-            emit_visible_images(stdout, term, placements, content_rows)?;
+            match gfx {
+                GraphicsProtocol::Kitty => {
+                    // Delete all previously placed Kitty images to prevent ghost
+                    // artifacts when scrolling.  q=2 suppresses terminal responses.
+                    write!(stdout, "\x1b_Ga=d,q=2;\x1b\\")?;
+                    emit_visible_images(stdout, term, placements, content_rows, gfx)?;
+                }
+                GraphicsProtocol::Sixel => {
+                    emit_visible_images(stdout, term, placements, content_rows, gfx)?;
+                }
+                GraphicsProtocol::None => {} // unreachable if placements is non-empty
+            }
         }
 
         // ── Draw footer (last row) ──────────────────────────────
-        draw_footer(stdout, content_rows + 1, cols, theme)?;
+        draw_footer(stdout, content_rows + 1, cols, theme, search)?;
 
         // End synchronized update — terminal renders the complete frame now.
         queue!(stdout, terminal::EndSynchronizedUpdate)?;
         stdout.flush()?;
 
         // ── Handle input ─────────────────────────────────────────
+        // Check for file changes every ~60 frames (~1 second at 16ms poll).
+        frame_count += 1;
+        if frame_count.is_multiple_of(60)
+            && let Some(path) = file_path
+            && let Ok(meta) = std::fs::metadata(path)
+            && let Ok(mtime) = meta.modified()
+        {
+            if let Some(prev) = last_mtime {
+                if mtime != *prev {
+                    *last_mtime = Some(mtime);
+                    return Ok(LoopExit::Reload);
+                }
+            } else {
+                *last_mtime = Some(mtime);
+            }
+        }
+
         match input::poll(term, render_state, content_rows, headings)? {
             input::Action::Continue => {}
             input::Action::Quit => return Ok(LoopExit::Quit),
@@ -762,13 +1133,21 @@ fn run_inner_loop<'a>(
             }
             input::Action::GotoLine(line) => return Ok(LoopExit::GotoLine(line)),
             input::Action::Redraw(pos) => return Ok(LoopExit::Redraw(pos)),
+            input::Action::StartSearch => return Ok(LoopExit::StartSearch),
+            input::Action::NextMatch => return Ok(LoopExit::NextMatch),
+            input::Action::PrevMatch => return Ok(LoopExit::PrevMatch),
+            input::Action::ToggleToc => return Ok(LoopExit::ToggleToc),
+            input::Action::OpenLink => return Ok(LoopExit::OpenLink),
+            input::Action::BufferNext => return Ok(LoopExit::BufferNext),
+            input::Action::BufferPrev => return Ok(LoopExit::BufferPrev),
+            input::Action::CopyBlock => return Ok(LoopExit::CopyBlock),
         }
     }
 }
 
 // ── Image rendering ──────────────────────────────────────────────
 
-/// Emit Kitty graphics protocol images for all placements visible in the
+/// Emit graphics protocol images for all placements visible in the
 /// current viewport.
 ///
 /// Uses `Terminal::scrollbar()` to determine the scroll offset, then maps
@@ -779,6 +1158,7 @@ fn emit_visible_images(
     term: &Terminal<'_, '_>,
     placements: &[ImagePlacement],
     content_rows: u16,
+    gfx: GraphicsProtocol,
 ) -> Result<()> {
     // Determine the scroll offset: which document row is at the top of the viewport.
     let scrollbar = term.scrollbar().context("VT scrollbar query")?;
@@ -809,16 +1189,166 @@ fn emit_visible_images(
         // frame-end flush so delete + re-emit is atomic (no blink).
         queue!(stdout, cursor::MoveTo(SIDE_PAD, screen_row + 1))?;
 
-        // Emit the Kitty graphics protocol escape sequence.
-        images::emit_kitty_image(stdout, &placement.png_data, placement.cols, placement.rows)?;
+        // Emit the image via the detected graphics protocol.
+        match gfx {
+            GraphicsProtocol::Kitty => {
+                images::emit_kitty_image(
+                    stdout,
+                    &placement.png_data,
+                    placement.cols,
+                    placement.rows,
+                )?;
+            }
+            GraphicsProtocol::Sixel => {
+                images::emit_sixel_image(
+                    stdout,
+                    &placement.png_data,
+                    placement.cols,
+                    placement.rows,
+                )?;
+            }
+            GraphicsProtocol::None => {} // should not reach here
+        }
     }
+
+    Ok(())
+}
+
+// ── Table of Contents sidebar ────────────────────────────────────
+
+/// Width of the separator column (│) between TOC and content.
+const TOC_SEP_WIDTH: usize = 1;
+
+/// Find the index of the "current" heading based on the viewport top row.
+///
+/// Returns the index of the last heading whose VT row is at or before
+/// the viewport top, giving a "you are here" indicator.
+fn find_current_heading(headings: &[input::Heading], viewport_top_row: usize) -> Option<usize> {
+    let mut best = None;
+    for (i, h) in headings.iter().enumerate() {
+        // h.line is the mapped VT row (1-indexed).
+        if h.line <= viewport_top_row {
+            best = Some(i);
+        } else {
+            break;
+        }
+    }
+    best
+}
+
+/// Draw one row of the TOC sidebar.
+///
+/// The TOC panel maps each heading to one screen row. If there are more
+/// headings than screen rows, the list is scrolled to keep the current
+/// heading visible.
+#[allow(clippy::too_many_arguments)]
+fn draw_toc_cell(
+    stdout: &mut io::Stdout,
+    headings: &[input::Heading],
+    screen_row: usize,
+    toc_width: usize,
+    content_rows: usize,
+    current_heading_idx: Option<usize>,
+    theme: &Theme,
+) -> Result<()> {
+    // Determine the scroll offset for the heading list.
+    let current = current_heading_idx.unwrap_or(0);
+    let total = headings.len();
+
+    // Compute scroll offset to keep current heading roughly centered.
+    let scroll = if total <= content_rows {
+        0
+    } else {
+        let half = content_rows / 2;
+        if current < half {
+            0
+        } else if current + half >= total {
+            total.saturating_sub(content_rows)
+        } else {
+            current - half
+        }
+    };
+
+    let heading_idx = scroll + screen_row;
+    let inner_w = toc_width.saturating_sub(TOC_SEP_WIDTH + 1); // 1 for left pad
+
+    if heading_idx < total {
+        let h = &headings[heading_idx];
+        let indent = (h.level as usize).saturating_sub(1).min(3) * 2;
+        let is_current = current_heading_idx == Some(heading_idx);
+
+        // Truncate heading text to fit.
+        let max_text = inner_w.saturating_sub(indent);
+        let display_text: String = if h.text.len() > max_text {
+            format!("{}…", &h.text[..max_text.saturating_sub(1)])
+        } else {
+            h.text.clone()
+        };
+
+        let fg = if is_current {
+            theme.accent
+        } else {
+            theme.muted
+        };
+        let bg = if is_current {
+            theme.search_match_bg()
+        } else {
+            theme.bg
+        };
+
+        queue!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(fg),
+            SetBackgroundColor(bg),
+            Print(" "),
+            Print(" ".repeat(indent)),
+        )?;
+        if is_current {
+            queue!(stdout, SetAttribute(Attribute::Bold))?;
+        }
+        queue!(stdout, Print(&display_text))?;
+
+        // Fill remaining TOC width.
+        let used = 1 + indent + UnicodeWidthStr::width(display_text.as_str());
+        if used < toc_width.saturating_sub(TOC_SEP_WIDTH) {
+            queue!(
+                stdout,
+                Print(" ".repeat(toc_width.saturating_sub(TOC_SEP_WIDTH) - used)),
+            )?;
+        }
+    } else {
+        // Empty TOC row.
+        queue!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(theme.fg),
+            SetBackgroundColor(theme.bg),
+            Print(" ".repeat(toc_width.saturating_sub(TOC_SEP_WIDTH))),
+        )?;
+    }
+
+    // Draw the separator │.
+    queue!(
+        stdout,
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(theme.border),
+        SetBackgroundColor(theme.bg),
+        Print("\u{2502}"),
+    )?;
 
     Ok(())
 }
 
 // ── Header ────────────────────────────────────────────────────────
 
-fn draw_header(stdout: &mut io::Stdout, cols: u16, theme: &Theme, filename: &str) -> Result<()> {
+fn draw_header(
+    stdout: &mut io::Stdout,
+    cols: u16,
+    theme: &Theme,
+    filename: &str,
+    buffer_info: Option<(usize, usize)>,
+) -> Result<()> {
     queue!(
         stdout,
         cursor::MoveTo(0, 0),
@@ -870,8 +1400,27 @@ fn draw_header(stdout: &mut io::Stdout, cols: u16, theme: &Theme, filename: &str
     };
     queue!(stdout, Print(display_name))?;
 
+    // Buffer ring indicator (e.g. " [2/5]") when multiple buffers are open.
+    let buf_indicator = if let Some((cur, total)) = buffer_info {
+        if total > 1 {
+            format!(" [{}/{}]", cur, total)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    if !buf_indicator.is_empty() {
+        queue!(
+            stdout,
+            SetForegroundColor(theme.muted),
+            Print(&buf_indicator),
+            SetForegroundColor(theme.header_fg),
+        )?;
+    }
+
     // Fill rest of header row with background.
-    let total_used = used + UnicodeWidthStr::width(display_name);
+    let total_used = used + UnicodeWidthStr::width(display_name) + buf_indicator.len();
     if total_used < usize::from(cols) {
         queue!(stdout, Print(" ".repeat(usize::from(cols) - total_used)))?;
     }
@@ -883,7 +1432,13 @@ fn draw_header(stdout: &mut io::Stdout, cols: u16, theme: &Theme, filename: &str
 
 // ── Footer / Status bar ───────────────────────────────────────────
 
-fn draw_footer(stdout: &mut io::Stdout, row: u16, cols: u16, theme: &Theme) -> Result<()> {
+fn draw_footer(
+    stdout: &mut io::Stdout,
+    row: u16,
+    cols: u16,
+    theme: &Theme,
+    search: &SearchState,
+) -> Result<()> {
     queue!(
         stdout,
         cursor::MoveTo(0, row),
@@ -925,9 +1480,24 @@ fn draw_footer(stdout: &mut io::Stdout, row: u16, cols: u16, theme: &Theme) -> R
             .map(|(_, t)| UnicodeWidthStr::width(*t))
             .sum::<usize>();
 
-    // Right side: theme name + right padding.
-    let right = format!("{}{pad}", theme.name);
-    let right_len = right.len();
+    // Right side: search info (if active) + theme name + right padding.
+    let search_info = if !search.query.is_empty() {
+        if search.match_rows.is_empty() {
+            format!("[/{}: no matches] ", search.query)
+        } else {
+            format!(
+                "[/{}: {}/{}] ",
+                search.query,
+                search.current + 1,
+                search.match_rows.len(),
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    let right = format!("{search_info}{}{pad}", theme.name);
+    let right_len = UnicodeWidthStr::width(right.as_str());
 
     // Fill middle with background.
     let middle = usize::from(cols).saturating_sub(left_len + right_len);
@@ -936,6 +1506,15 @@ fn draw_footer(stdout: &mut io::Stdout, row: u16, cols: u16, theme: &Theme) -> R
         SetForegroundColor(theme.fg),
         Print(" ".repeat(middle)),
     )?;
+
+    // Search info (right-aligned, before theme name).
+    if !search_info.is_empty() {
+        queue!(
+            stdout,
+            SetForegroundColor(theme.accent),
+            Print(&search_info),
+        )?;
+    }
 
     // Theme name (right-aligned).
     queue!(
@@ -959,11 +1538,14 @@ fn build_key_hints() -> Vec<(HintStyle, &'static str)> {
         (HintStyle::Key, "j/k "),
         (HintStyle::Desc, "Scroll "),
         (HintStyle::Sep, "\u{2502}"),
-        (HintStyle::Key, " g/G "),
-        (HintStyle::Desc, "Top/Bot "),
+        (HintStyle::Key, " / "),
+        (HintStyle::Desc, "Search "),
         (HintStyle::Sep, "\u{2502}"),
-        (HintStyle::Key, " s "),
-        (HintStyle::Desc, "Sections "),
+        (HintStyle::Key, " Tab "),
+        (HintStyle::Desc, "TOC "),
+        (HintStyle::Sep, "\u{2502}"),
+        (HintStyle::Key, " l "),
+        (HintStyle::Desc, "Links "),
         (HintStyle::Sep, "\u{2502}"),
         (HintStyle::Key, " t/T "),
         (HintStyle::Desc, "Theme "),
@@ -1564,5 +2146,100 @@ End.\n";
         let mapped = map_headings_to_vt_rows(&headings, ansi);
         assert_eq!(mapped[0].line, 1); // first "Foo" at row 0 → 1-indexed
         assert_eq!(mapped[1].line, 3); // second "Foo" at row 2 → 1-indexed
+    }
+
+    #[test]
+    fn search_smart_case_insensitive() {
+        let mut search = SearchState::new();
+        search.query = "hello".to_string();
+        search.find_matches("Hello World\r\nbye\r\nhello again");
+        // lowercase query → case-insensitive: should match "Hello" and "hello"
+        assert_eq!(search.match_rows, vec![1, 3]);
+    }
+
+    #[test]
+    fn search_smart_case_sensitive() {
+        let mut search = SearchState::new();
+        search.query = "Hello".to_string();
+        search.find_matches("Hello World\r\nbye\r\nhello again");
+        // uppercase in query → case-sensitive: only matches "Hello"
+        assert_eq!(search.match_rows, vec![1]);
+    }
+
+    #[test]
+    fn search_next_prev_wraps() {
+        let mut search = SearchState::new();
+        search.query = "x".to_string();
+        search.find_matches("x\r\ny\r\nx\r\nz");
+        assert_eq!(search.match_rows, vec![1, 3]);
+
+        // next_match advances with wraparound
+        assert_eq!(search.next_match(), Some(3));
+        assert_eq!(search.next_match(), Some(1));
+        assert_eq!(search.next_match(), Some(3));
+
+        // prev_match wraps the other way
+        assert_eq!(search.prev_match(), Some(1));
+        assert_eq!(search.prev_match(), Some(3));
+    }
+
+    #[test]
+    fn search_first_match_from() {
+        let mut search = SearchState::new();
+        search.query = "a".to_string();
+        search.find_matches("a\r\nb\r\na\r\nc\r\na");
+        assert_eq!(search.match_rows, vec![1, 3, 5]);
+
+        // Jump to first match at or after row 2
+        assert_eq!(search.first_match_from(2), Some(3));
+        assert_eq!(search.current, 1); // index into match_rows
+
+        // Jump from beyond last match — wraps to first
+        assert_eq!(search.first_match_from(6), Some(1));
+        assert_eq!(search.current, 0);
+    }
+
+    #[test]
+    fn search_strips_ansi_for_matching() {
+        let mut search = SearchState::new();
+        search.query = "hello".to_string();
+        search.find_matches("\x1b[1;31mHello\x1b[0m world\r\nnope");
+        assert_eq!(search.match_rows, vec![1]);
+    }
+
+    #[test]
+    fn find_current_heading_basic() {
+        let headings = vec![
+            input::Heading {
+                text: "A".to_string(),
+                level: 1,
+                line: 1,
+            },
+            input::Heading {
+                text: "B".to_string(),
+                level: 2,
+                line: 10,
+            },
+            input::Heading {
+                text: "C".to_string(),
+                level: 2,
+                line: 20,
+            },
+        ];
+
+        // Before first heading
+        assert_eq!(find_current_heading(&headings, 0), None);
+
+        // At first heading
+        assert_eq!(find_current_heading(&headings, 1), Some(0));
+
+        // Between first and second
+        assert_eq!(find_current_heading(&headings, 5), Some(0));
+
+        // At second heading
+        assert_eq!(find_current_heading(&headings, 10), Some(1));
+
+        // After last heading
+        assert_eq!(find_current_heading(&headings, 50), Some(2));
     }
 }

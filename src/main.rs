@@ -81,7 +81,7 @@ fn main() -> Result<()> {
     // Print fzf header line and exit (used by transform-header).
     if cli.print_header {
         let prefs = config::load_preferences();
-        let theme = &theme::THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
+        let theme = &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         print!("{}", viewer::fzf_header_line(theme));
         return Ok(());
     }
@@ -145,7 +145,10 @@ fn main() -> Result<()> {
             &base_dir,
             cli.line,
             code_lang.as_deref(),
+            Some(file.as_path()),
+            None, // No buffer ring in single-file mode.
         )
+        .map(|_| ()) // Single file — ignore BufferNext/BufferPrev.
     }
 }
 
@@ -155,13 +158,13 @@ fn main() -> Result<()> {
 fn cycle_theme(forward: bool) -> Result<()> {
     let mut prefs = config::load_preferences();
     let current = theme::theme_index_by_name(config::active_theme(&prefs));
-    let len = theme::THEMES.len();
+    let len = theme::ALL_THEMES.len();
     let next = if forward {
         (current + 1) % len
     } else {
         (current + len - 1) % len
     };
-    config::set_active_theme(&mut prefs, theme::THEMES[next].name);
+    config::set_active_theme(&mut prefs, theme::ALL_THEMES[next].name);
     config::save_preferences(&prefs).context("failed to save theme preference")?;
     Ok(())
 }
@@ -265,12 +268,18 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         (cmd.clone(), cmd)
     };
 
+    // Buffer ring: tracks recently opened files for Ctrl-n / Ctrl-p cycling.
+    let mut buffer_ring: Vec<PathBuf> = Vec::new();
+    // Index into buffer_ring — set before first use inside the loop.
+    #[allow(unused_assignments)]
+    let mut buffer_index: usize = 0;
+
     loop {
         // Build the initial header from current preferences (may have changed
         // via theme cycling in the previous iteration).
         let prefs = config::load_preferences();
         let initial_theme =
-            &theme::THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
+            &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         let initial_header = viewer::fzf_header_line(initial_theme);
 
         let mut fzf = Command::new("fzf");
@@ -338,29 +347,47 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         }
 
         let file = PathBuf::from(&selected);
-        let raw_content = std::fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
 
-        let is_markdown = highlight::is_markdown_path(&file);
-        let code_lang = if is_markdown {
-            None
-        } else {
-            highlight::lang_for_path(&file)
-        };
+        // Add to buffer ring (avoid duplicates at the end).
+        if buffer_ring.last() != Some(&file) {
+            buffer_ring.push(file.clone());
+        }
+        buffer_index = buffer_ring.len() - 1;
 
-        let filename = file.display().to_string();
-        let base_dir = file
-            .canonicalize()
-            .unwrap_or_else(|_| file.clone())
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        // Open the selected file — then loop on Ctrl-n / Ctrl-p to cycle
+        // through the buffer ring without returning to fzf.
+        loop {
+            let cur_file = &buffer_ring[buffer_index];
+            let raw_content = std::fs::read_to_string(cur_file)
+                .with_context(|| format!("failed to read {}", cur_file.display()))?;
 
-        // Code files: open in nvim if available, otherwise fall back to
-        // the built-in viewer.  Markdown always uses the built-in viewer.
-        if code_lang.is_some() && has_nvim() {
-            open_in_nvim(&file)?;
-        } else {
-            viewer::run(
+            let is_markdown = highlight::is_markdown_path(cur_file);
+            let code_lang = if is_markdown {
+                None
+            } else {
+                highlight::lang_for_path(cur_file)
+            };
+
+            let filename = cur_file.display().to_string();
+            let base_dir = cur_file
+                .canonicalize()
+                .unwrap_or_else(|_| cur_file.clone())
+                .parent()
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+            // Code files: open in nvim if available, otherwise fall back to
+            // the built-in viewer.  Markdown always uses the built-in viewer.
+            if code_lang.is_some() && has_nvim() {
+                open_in_nvim(cur_file)?;
+                break; // Return to fzf picker after nvim exits.
+            }
+
+            let buf_info = if buffer_ring.len() > 1 {
+                Some((buffer_index + 1, buffer_ring.len()))
+            } else {
+                None
+            };
+            let exit = viewer::run(
                 &raw_content,
                 max_scrollback,
                 theme,
@@ -368,7 +395,23 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                 &base_dir,
                 None,
                 code_lang.as_deref(),
+                Some(cur_file.as_path()),
+                buf_info,
             )?;
+
+            match exit {
+                viewer::ViewerExit::Quit => break, // Back to fzf picker.
+                viewer::ViewerExit::BufferNext => {
+                    if buffer_ring.len() > 1 {
+                        buffer_index = (buffer_index + 1) % buffer_ring.len();
+                    }
+                }
+                viewer::ViewerExit::BufferPrev => {
+                    if buffer_ring.len() > 1 {
+                        buffer_index = (buffer_index + buffer_ring.len() - 1) % buffer_ring.len();
+                    }
+                }
+            }
         }
     }
 }

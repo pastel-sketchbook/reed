@@ -2,9 +2,17 @@
 //!
 //! Each field maps to a UI purpose — rendering code references `theme.heading`
 //! or `theme.code_bg` rather than a raw `Color::Cyan` or `Color::DarkGrey`.
+//!
+//! Built-in themes are defined in [`THEMES`]. Users can add custom themes by
+//! placing TOML files in `~/.config/reed/themes/`. See [`load_user_themes`].
+
+use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use crossterm::style::{Attribute, Color};
+use serde::Deserialize;
 use termimad::MadSkin;
+use tracing::warn;
 
 /// Semantic color theme for the markdown TUI.
 ///
@@ -42,7 +50,218 @@ pub struct Theme {
 pub const MIN_TERM_WIDTH: u16 = 40;
 pub const MIN_TERM_HEIGHT: u16 = 8;
 
-/// Available themes, indexed by position. First entry is the default.
+impl Theme {
+    /// Background color for rows containing a search match.
+    /// A subtle tint derived from the accent color blended with the theme bg.
+    pub fn search_match_bg(&self) -> Color {
+        // If the theme uses a transparent bg (Color::Reset), use a dim tint.
+        let (br, bg, bb) = match self.bg {
+            Color::Rgb { r, g, b } => (r, g, b),
+            _ => (0, 0, 0), // transparent bg — assume black
+        };
+        let (ar, ag, ab) = match self.accent {
+            Color::Rgb { r, g, b } => (r, g, b),
+            _ => (255, 220, 100),
+        };
+        // Blend: 85% bg + 15% accent
+        let blend = |base: u8, tint: u8| -> u8 {
+            ((u16::from(base) * 85 + u16::from(tint) * 15) / 100) as u8
+        };
+        Color::Rgb {
+            r: blend(br, ar).max(20),
+            g: blend(bg, ag).max(18),
+            b: blend(bb, ab).max(10),
+        }
+    }
+
+    /// Background color for the *current* search match (more prominent).
+    pub fn search_current_bg(&self) -> Color {
+        let (br, bg, bb) = match self.bg {
+            Color::Rgb { r, g, b } => (r, g, b),
+            _ => (0, 0, 0),
+        };
+        let (ar, ag, ab) = match self.accent {
+            Color::Rgb { r, g, b } => (r, g, b),
+            _ => (255, 220, 100),
+        };
+        // Blend: 65% bg + 35% accent
+        let blend = |base: u8, tint: u8| -> u8 {
+            ((u16::from(base) * 65 + u16::from(tint) * 35) / 100) as u8
+        };
+        Color::Rgb {
+            r: blend(br, ar).max(40),
+            g: blend(bg, ag).max(35),
+            b: blend(bb, ab).max(15),
+        }
+    }
+}
+
+// ── User theme TOML schema ───────────────────────────────────────
+
+/// TOML-friendly representation of a custom theme.
+///
+/// Colors are specified as `"#RRGGBB"` hex strings. The special value
+/// `"reset"` maps to [`Color::Reset`] (transparent terminal background).
+///
+/// Example `~/.config/reed/themes/my-theme.toml`:
+///
+/// ```toml
+/// name = "My Theme"
+/// bg = "#1e1e2e"
+/// fg = "#cdd6f4"
+/// heading = "#89b4fa"
+/// accent = "#f5c2e7"
+/// muted = "#6c7086"
+/// code_bg = "#181825"
+/// code_fg = "#a6e3a1"
+/// quote_mark = "#a6e3a1"
+/// border = "#313244"
+/// header_bg = "#181825"
+/// header_fg = "#cdd6f4"
+/// title = "#89b4fa"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+struct UserTheme {
+    name: String,
+    bg: String,
+    fg: String,
+    heading: String,
+    accent: String,
+    muted: String,
+    code_bg: String,
+    code_fg: String,
+    quote_mark: String,
+    border: String,
+    header_bg: String,
+    header_fg: String,
+    title: String,
+}
+
+/// Parse a hex color string like `"#RRGGBB"` or `"#RGB"` into a crossterm
+/// [`Color`]. The special value `"reset"` (case-insensitive) yields
+/// [`Color::Reset`].
+fn parse_hex_color(s: &str) -> Option<Color> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("reset") {
+        return Some(Color::Reset);
+    }
+    let hex = s.strip_prefix('#')?;
+    match hex.len() {
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Color::Rgb { r, g, b })
+        }
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+            Some(Color::Rgb { r, g, b })
+        }
+        _ => None,
+    }
+}
+
+impl UserTheme {
+    /// Convert to a [`Theme`]. The name string is leaked to produce a
+    /// `&'static str` — acceptable because themes live for the entire
+    /// process lifetime.
+    fn into_theme(self) -> Option<Theme> {
+        Some(Theme {
+            name: Box::leak(self.name.into_boxed_str()),
+            bg: parse_hex_color(&self.bg)?,
+            fg: parse_hex_color(&self.fg)?,
+            heading: parse_hex_color(&self.heading)?,
+            accent: parse_hex_color(&self.accent)?,
+            muted: parse_hex_color(&self.muted)?,
+            code_bg: parse_hex_color(&self.code_bg)?,
+            code_fg: parse_hex_color(&self.code_fg)?,
+            quote_mark: parse_hex_color(&self.quote_mark)?,
+            border: parse_hex_color(&self.border)?,
+            header_bg: parse_hex_color(&self.header_bg)?,
+            header_fg: parse_hex_color(&self.header_fg)?,
+            title: parse_hex_color(&self.title)?,
+        })
+    }
+}
+
+/// Return the user themes directory (`~/.config/reed/themes/`).
+fn user_themes_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "reed").map(|dirs| dirs.config_dir().join("themes"))
+}
+
+/// Load custom themes from TOML files in `~/.config/reed/themes/*.toml`.
+///
+/// Invalid files are silently skipped (with a `tracing::warn`).
+fn load_user_themes() -> Vec<Theme> {
+    let Some(dir) = user_themes_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    let mut themes = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match toml::from_str::<UserTheme>(&content) {
+                    Ok(ut) => {
+                        let name = ut.name.clone();
+                        match ut.into_theme() {
+                            Some(theme) => themes.push(theme),
+                            None => warn!(
+                                file = %path.display(),
+                                name,
+                                "user theme has invalid hex color(s), skipping"
+                            ),
+                        }
+                    }
+                    Err(e) => warn!(
+                        file = %path.display(),
+                        error = %e,
+                        "failed to parse user theme TOML, skipping"
+                    ),
+                },
+                Err(e) => warn!(
+                    file = %path.display(),
+                    error = %e,
+                    "failed to read user theme file, skipping"
+                ),
+            }
+        }
+    }
+    // Sort by name for deterministic ordering.
+    themes.sort_by(|a, b| a.name.cmp(b.name));
+    themes
+}
+
+/// All available themes: built-in [`THEMES`] followed by user-defined themes
+/// loaded from `~/.config/reed/themes/*.toml`.
+///
+/// Computed once on first access.
+pub static ALL_THEMES: LazyLock<Vec<Theme>> = LazyLock::new(|| {
+    let mut all = THEMES.to_vec();
+    let user = load_user_themes();
+    // Skip user themes whose names collide with built-in themes.
+    for theme in user {
+        if all.iter().any(|t| t.name == theme.name) {
+            warn!(
+                name = theme.name,
+                "user theme name collides with built-in theme, skipping"
+            );
+        } else {
+            all.push(theme);
+        }
+    }
+    all
+});
+
+/// Built-in themes, indexed by position. First entry is the default.
+///
+/// For the full list of themes (built-in + user), use [`ALL_THEMES`].
 pub const THEMES: &[Theme] = &[
     // ── Dark themes ──────────────────────────────────────────────
     //
@@ -928,11 +1147,11 @@ pub const THEMES: &[Theme] = &[
     },
 ];
 
-/// Look up a theme index by name (case-sensitive). Returns 0 (Default)
-/// if no theme matches.
+/// Look up a theme index by name (case-sensitive) in [`ALL_THEMES`].
+/// Returns 0 (Default) if no theme matches.
 #[must_use]
 pub fn theme_index_by_name(name: &str) -> usize {
-    THEMES.iter().position(|t| t.name == name).unwrap_or(0)
+    ALL_THEMES.iter().position(|t| t.name == name).unwrap_or(0)
 }
 
 /// Build a [`MadSkin`] configured with the given theme colors.
@@ -1032,5 +1251,131 @@ mod tests {
         for theme in THEMES {
             let _ = build_skin(theme);
         }
+    }
+
+    // ── User theme / hex parsing tests ───────────────────────────
+
+    #[test]
+    fn parse_hex_color_6digit() {
+        assert_eq!(
+            parse_hex_color("#1e1e2e"),
+            Some(Color::Rgb {
+                r: 0x1e,
+                g: 0x1e,
+                b: 0x2e,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_hex_color_3digit() {
+        // #abc → #aabbcc
+        assert_eq!(
+            parse_hex_color("#abc"),
+            Some(Color::Rgb {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_hex_color_reset() {
+        assert_eq!(parse_hex_color("reset"), Some(Color::Reset));
+        assert_eq!(parse_hex_color("RESET"), Some(Color::Reset));
+    }
+
+    #[test]
+    fn parse_hex_color_invalid() {
+        assert_eq!(parse_hex_color("notacolor"), None);
+        assert_eq!(parse_hex_color("#zzzzzz"), None);
+        assert_eq!(parse_hex_color("#12"), None);
+    }
+
+    #[test]
+    fn user_theme_toml_roundtrip() {
+        let toml_str = r##"
+name = "Test Theme"
+bg = "#1e1e2e"
+fg = "#cdd6f4"
+heading = "#89b4fa"
+accent = "#f5c2e7"
+muted = "#6c7086"
+code_bg = "#181825"
+code_fg = "#a6e3a1"
+quote_mark = "#a6e3a1"
+border = "#313244"
+header_bg = "#181825"
+header_fg = "#cdd6f4"
+title = "#89b4fa"
+"##;
+        let ut: UserTheme = toml::from_str(toml_str).unwrap();
+        let theme = ut.into_theme().expect("should parse all colors");
+        assert_eq!(theme.name, "Test Theme");
+        assert_eq!(
+            theme.bg,
+            Color::Rgb {
+                r: 0x1e,
+                g: 0x1e,
+                b: 0x2e
+            }
+        );
+    }
+
+    #[test]
+    fn user_theme_bad_hex_returns_none() {
+        let toml_str = r##"
+name = "Bad"
+bg = "nope"
+fg = "#cdd6f4"
+heading = "#89b4fa"
+accent = "#f5c2e7"
+muted = "#6c7086"
+code_bg = "#181825"
+code_fg = "#a6e3a1"
+quote_mark = "#a6e3a1"
+border = "#313244"
+header_bg = "#181825"
+header_fg = "#cdd6f4"
+title = "#89b4fa"
+"##;
+        let ut: UserTheme = toml::from_str(toml_str).unwrap();
+        assert!(ut.into_theme().is_none(), "bad hex should fail into_theme");
+    }
+
+    #[test]
+    fn user_theme_reset_bg() {
+        let toml_str = r##"
+name = "Transparent"
+bg = "reset"
+fg = "#ffffff"
+heading = "#ffffff"
+accent = "#ffffff"
+muted = "#ffffff"
+code_bg = "#000000"
+code_fg = "#ffffff"
+quote_mark = "#ffffff"
+border = "#ffffff"
+header_bg = "#000000"
+header_fg = "#ffffff"
+title = "#ffffff"
+"##;
+        let ut: UserTheme = toml::from_str(toml_str).unwrap();
+        let theme = ut.into_theme().unwrap();
+        assert_eq!(theme.bg, Color::Reset);
+    }
+
+    #[test]
+    fn all_themes_includes_builtins() {
+        // ALL_THEMES should have at least the built-in themes.
+        assert!(ALL_THEMES.len() >= THEMES.len());
+        // First theme should be Default.
+        assert_eq!(ALL_THEMES[0].name, "Default");
+    }
+
+    #[test]
+    fn user_themes_dir_is_some() {
+        assert!(user_themes_dir().is_some());
     }
 }
