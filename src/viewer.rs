@@ -125,7 +125,7 @@ pub fn print_to_stdout(markdown: &str) {
 /// Respects `FZF_PREVIEW_COLUMNS` / `FZF_PREVIEW_LINES` for width/height.
 /// When `start_line` is set, output begins at that 1-indexed line.
 pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usize>) -> Result<()> {
-    // Resolve theme: Ghostty forces FFE Dark; else CLI flag > saved preference.
+    // Resolve theme: CLI flag > saved preference > default (FFE Dark on Ghostty).
     let prefs = config::load_preferences();
     let name = config::resolve_theme_name(theme_name, &prefs.theme);
     let theme = &theme::THEMES[theme::theme_index_by_name(name)];
@@ -263,7 +263,7 @@ pub fn run(
         return Ok(());
     }
 
-    // Resolve initial theme: Ghostty forces FFE Dark; else CLI flag > saved preference > default.
+    // Resolve initial theme: CLI flag > saved preference > default (FFE Dark on Ghostty).
     let prefs = config::load_preferences();
     let theme_name = config::resolve_theme_name(initial_theme, &prefs.theme);
     let mut theme_index = theme::theme_index_by_name(theme_name);

@@ -152,12 +152,7 @@ fn main() -> Result<()> {
 // ── Theme cycling (for fzf integration) ─────────────────────────
 
 /// Cycle to the next or previous theme, save the preference, and exit.
-///
-/// On Ghostty the theme is always forced to FFE Dark, so cycling is a no-op.
 fn cycle_theme(forward: bool) -> Result<()> {
-    if config::is_ghostty() {
-        return Ok(());
-    }
     let prefs = config::load_preferences();
     let current = theme::theme_index_by_name(&prefs.theme);
     let len = theme::THEMES.len();

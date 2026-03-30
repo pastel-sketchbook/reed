@@ -35,23 +35,28 @@ pub fn is_ghostty() -> bool {
     std::env::var("TERM").is_ok_and(|t| t == "xterm-ghostty")
 }
 
-/// Pick the default theme name (first theme in `theme::THEMES`).
+/// Pick the default theme name.
+///
+/// On Ghostty the default is `"FFE Dark"`; everywhere else it is the first
+/// theme in `theme::THEMES`.
 fn default_theme_name() -> &'static str {
-    theme::THEMES[0].name
+    if is_ghostty() {
+        theme::THEMES
+            .iter()
+            .find(|t| t.name == "FFE Dark")
+            .map_or(theme::THEMES[0].name, |t| t.name)
+    } else {
+        theme::THEMES[0].name
+    }
 }
 
 /// Resolve the effective theme name.
 ///
-/// Ghostty always forces `"FFE Dark"` regardless of CLI flags or saved
-/// preferences.  Otherwise: CLI flag > saved preference > default.
+/// CLI flag > saved preference > default.
+/// On Ghostty the default is `"FFE Dark"` instead of the first theme in the
+/// list, but saved preferences and CLI flags still take priority.
 #[must_use]
 pub fn resolve_theme_name<'a>(cli_theme: Option<&'a str>, saved_theme: &'a str) -> &'a str {
-    if is_ghostty() {
-        return theme::THEMES
-            .iter()
-            .find(|t| t.name == "FFE Dark")
-            .map_or(theme::THEMES[0].name, |t| t.name);
-    }
     cli_theme.unwrap_or(saved_theme)
 }
 
