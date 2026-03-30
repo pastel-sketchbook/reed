@@ -78,14 +78,14 @@ pub fn fzf_header_line(theme: &Theme) -> String {
 /// so we can fall back to showing raw code blocks / alt text instead of
 /// emitting Kitty escape sequences that would produce garbage.
 fn kitty_graphics_supported() -> bool {
+    if config::is_ghostty() {
+        return true;
+    }
+
     // TERM_PROGRAM is set by many terminal emulators.
     if let Ok(prog) = std::env::var("TERM_PROGRAM") {
         let lc = prog.to_ascii_lowercase();
-        if lc.contains("kitty")
-            || lc.contains("wezterm")
-            || lc.contains("ghostty")
-            || lc.contains("konsole")
-        {
+        if lc.contains("kitty") || lc.contains("wezterm") || lc.contains("konsole") {
             return true;
         }
     }
@@ -125,9 +125,9 @@ pub fn print_to_stdout(markdown: &str) {
 /// Respects `FZF_PREVIEW_COLUMNS` / `FZF_PREVIEW_LINES` for width/height.
 /// When `start_line` is set, output begins at that 1-indexed line.
 pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usize>) -> Result<()> {
-    // Resolve theme.
+    // Resolve theme: Ghostty forces FFE Dark; else CLI flag > saved preference.
     let prefs = config::load_preferences();
-    let name = theme_name.unwrap_or(&prefs.theme);
+    let name = config::resolve_theme_name(theme_name, &prefs.theme);
     let theme = &theme::THEMES[theme::theme_index_by_name(name)];
 
     // Determine output width: FZF_PREVIEW_COLUMNS > terminal width > 80.
@@ -181,7 +181,7 @@ pub fn preview_code(
     start_line: Option<usize>,
 ) -> Result<()> {
     let prefs = config::load_preferences();
-    let name = theme_name.unwrap_or(&prefs.theme);
+    let name = config::resolve_theme_name(theme_name, &prefs.theme);
     let theme = &theme::THEMES[theme::theme_index_by_name(name)];
 
     // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
@@ -263,9 +263,9 @@ pub fn run(
         return Ok(());
     }
 
-    // Resolve initial theme: CLI flag > saved preference > default.
+    // Resolve initial theme: Ghostty forces FFE Dark; else CLI flag > saved preference > default.
     let prefs = config::load_preferences();
-    let theme_name = initial_theme.unwrap_or(&prefs.theme);
+    let theme_name = config::resolve_theme_name(initial_theme, &prefs.theme);
     let mut theme_index = theme::theme_index_by_name(theme_name);
 
     // Enter raw mode / alternate screen.
@@ -425,13 +425,17 @@ pub fn run(
             )? {
                 LoopExit::Quit => break,
                 LoopExit::NextTheme => {
-                    theme_index = (theme_index + 1) % theme::THEMES.len();
-                    persist_theme(theme_index);
+                    if !config::is_ghostty() {
+                        theme_index = (theme_index + 1) % theme::THEMES.len();
+                        persist_theme(theme_index);
+                    }
                 }
                 LoopExit::PrevTheme => {
-                    let len = theme::THEMES.len();
-                    theme_index = (theme_index + len - 1) % len;
-                    persist_theme(theme_index);
+                    if !config::is_ghostty() {
+                        let len = theme::THEMES.len();
+                        theme_index = (theme_index + len - 1) % len;
+                        persist_theme(theme_index);
+                    }
                 }
                 LoopExit::Resize(new_cols, new_rows) => {
                     cols = new_cols;

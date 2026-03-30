@@ -29,21 +29,30 @@ impl Default for Preferences {
     }
 }
 
-/// Pick the default theme based on the terminal environment.
-///
-/// - `TERM=xterm-ghostty` → `"FFE Dark"` (tuned for Ghostty's rendering).
-/// - Otherwise → first theme in `theme::THEMES` (the classic default).
+/// Returns `true` when running inside the Ghostty terminal.
+#[must_use]
+pub fn is_ghostty() -> bool {
+    std::env::var("TERM").is_ok_and(|t| t == "xterm-ghostty")
+}
+
+/// Pick the default theme name (first theme in `theme::THEMES`).
 fn default_theme_name() -> &'static str {
-    if let Ok(term) = std::env::var("TERM")
-        && term == "xterm-ghostty"
-    {
-        // Find FFE Dark by name; fall back to first theme if not found.
+    theme::THEMES[0].name
+}
+
+/// Resolve the effective theme name.
+///
+/// Ghostty always forces `"FFE Dark"` regardless of CLI flags or saved
+/// preferences.  Otherwise: CLI flag > saved preference > default.
+#[must_use]
+pub fn resolve_theme_name<'a>(cli_theme: Option<&'a str>, saved_theme: &'a str) -> &'a str {
+    if is_ghostty() {
         return theme::THEMES
             .iter()
             .find(|t| t.name == "FFE Dark")
             .map_or(theme::THEMES[0].name, |t| t.name);
     }
-    theme::THEMES[0].name
+    cli_theme.unwrap_or(saved_theme)
 }
 
 /// Resolve the preferences file path.
