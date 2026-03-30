@@ -125,9 +125,9 @@ pub fn print_to_stdout(markdown: &str) {
 /// Respects `FZF_PREVIEW_COLUMNS` / `FZF_PREVIEW_LINES` for width/height.
 /// When `start_line` is set, output begins at that 1-indexed line.
 pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usize>) -> Result<()> {
-    // Resolve theme: CLI flag > saved preference > default (FFE Dark on Ghostty).
+    // Resolve theme: CLI flag > saved preference (Ghostty-aware) > default.
     let prefs = config::load_preferences();
-    let name = config::resolve_theme_name(theme_name, &prefs.theme);
+    let name = config::resolve_theme_name(theme_name, &prefs);
     let theme = &theme::THEMES[theme::theme_index_by_name(name)];
 
     // Determine output width: FZF_PREVIEW_COLUMNS > terminal width > 80.
@@ -181,7 +181,7 @@ pub fn preview_code(
     start_line: Option<usize>,
 ) -> Result<()> {
     let prefs = config::load_preferences();
-    let name = config::resolve_theme_name(theme_name, &prefs.theme);
+    let name = config::resolve_theme_name(theme_name, &prefs);
     let theme = &theme::THEMES[theme::theme_index_by_name(name)];
 
     // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
@@ -263,9 +263,9 @@ pub fn run(
         return Ok(());
     }
 
-    // Resolve initial theme: CLI flag > saved preference > default (FFE Dark on Ghostty).
+    // Resolve initial theme: CLI flag > saved preference (Ghostty-aware) > default.
     let prefs = config::load_preferences();
-    let theme_name = config::resolve_theme_name(initial_theme, &prefs.theme);
+    let theme_name = config::resolve_theme_name(initial_theme, &prefs);
     let mut theme_index = theme::theme_index_by_name(theme_name);
 
     // Enter raw mode / alternate screen.
@@ -425,17 +425,13 @@ pub fn run(
             )? {
                 LoopExit::Quit => break,
                 LoopExit::NextTheme => {
-                    if !config::is_ghostty() {
-                        theme_index = (theme_index + 1) % theme::THEMES.len();
-                        persist_theme(theme_index);
-                    }
+                    theme_index = (theme_index + 1) % theme::THEMES.len();
+                    persist_theme(theme_index);
                 }
                 LoopExit::PrevTheme => {
-                    if !config::is_ghostty() {
-                        let len = theme::THEMES.len();
-                        theme_index = (theme_index + len - 1) % len;
-                        persist_theme(theme_index);
-                    }
+                    let len = theme::THEMES.len();
+                    theme_index = (theme_index + len - 1) % len;
+                    persist_theme(theme_index);
                 }
                 LoopExit::Resize(new_cols, new_rows) => {
                     cols = new_cols;
@@ -608,9 +604,9 @@ fn build_processed_markdown(
 
 /// Persist the current theme choice to disk (best-effort).
 fn persist_theme(theme_index: usize) {
-    if let Err(e) = config::save_preferences(&config::Preferences {
-        theme: theme::THEMES[theme_index].name.to_string(),
-    }) {
+    let mut prefs = config::load_preferences();
+    config::set_active_theme(&mut prefs, theme::THEMES[theme_index].name);
+    if let Err(e) = config::save_preferences(&prefs) {
         warn!(error = %e, "failed to save theme preference");
     }
 }

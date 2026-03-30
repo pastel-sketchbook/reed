@@ -17,14 +17,26 @@ const APP_NAME: &str = "reed";
 /// Persistent user preferences (TOML).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Preferences {
-    /// Theme name (must match a name in `theme::THEMES`).
+    /// Theme name for non-Ghostty terminals.
     pub theme: String,
+    /// Separate theme name for Ghostty (defaults to `"FFE Dark"`).
+    #[serde(default = "default_ghostty_theme")]
+    pub ghostty_theme: String,
+}
+
+fn default_ghostty_theme() -> String {
+    theme::THEMES
+        .iter()
+        .find(|t| t.name == "FFE Dark")
+        .map_or(theme::THEMES[0].name, |t| t.name)
+        .to_string()
 }
 
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            theme: default_theme_name().to_string(),
+            theme: theme::THEMES[0].name.to_string(),
+            ghostty_theme: default_ghostty_theme(),
         }
     }
 }
@@ -35,29 +47,32 @@ pub fn is_ghostty() -> bool {
     std::env::var("TERM").is_ok_and(|t| t == "xterm-ghostty")
 }
 
-/// Pick the default theme name.
-///
-/// On Ghostty the default is `"FFE Dark"`; everywhere else it is the first
-/// theme in `theme::THEMES`.
-fn default_theme_name() -> &'static str {
+/// Return the active saved theme from preferences, choosing `ghostty_theme`
+/// when running inside Ghostty and `theme` otherwise.
+#[must_use]
+pub fn active_theme(prefs: &Preferences) -> &str {
     if is_ghostty() {
-        theme::THEMES
-            .iter()
-            .find(|t| t.name == "FFE Dark")
-            .map_or(theme::THEMES[0].name, |t| t.name)
+        &prefs.ghostty_theme
     } else {
-        theme::THEMES[0].name
+        &prefs.theme
     }
 }
 
 /// Resolve the effective theme name.
 ///
-/// CLI flag > saved preference > default.
-/// On Ghostty the default is `"FFE Dark"` instead of the first theme in the
-/// list, but saved preferences and CLI flags still take priority.
+/// CLI flag > saved preference (Ghostty-aware) > default.
 #[must_use]
-pub fn resolve_theme_name<'a>(cli_theme: Option<&'a str>, saved_theme: &'a str) -> &'a str {
-    cli_theme.unwrap_or(saved_theme)
+pub fn resolve_theme_name<'a>(cli_theme: Option<&'a str>, prefs: &'a Preferences) -> &'a str {
+    cli_theme.unwrap_or_else(|| active_theme(prefs))
+}
+
+/// Update the appropriate theme field on `prefs` for the current terminal.
+pub fn set_active_theme(prefs: &mut Preferences, name: &str) {
+    if is_ghostty() {
+        prefs.ghostty_theme = name.to_string();
+    } else {
+        prefs.theme = name.to_string();
+    }
 }
 
 /// Resolve the preferences file path.
@@ -103,17 +118,27 @@ mod tests {
     #[test]
     fn preferences_default_uses_expected_theme() {
         let prefs = Preferences::default();
-        assert_eq!(prefs.theme, default_theme_name());
+        assert_eq!(prefs.theme, theme::THEMES[0].name);
+        assert_eq!(prefs.ghostty_theme, default_ghostty_theme());
     }
 
     #[test]
     fn preferences_roundtrip_toml() {
         let prefs = Preferences {
             theme: "Gruvbox".to_string(),
+            ghostty_theme: "FFE Dark".to_string(),
         };
         let toml_str = toml::to_string_pretty(&prefs).unwrap();
         let parsed: Preferences = toml::from_str(&toml_str).unwrap();
         assert_eq!(prefs, parsed);
+    }
+
+    #[test]
+    fn preferences_missing_ghostty_theme_deserializes_default() {
+        let toml_str = "theme = \"Gruvbox\"\n";
+        let parsed: Preferences = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.theme, "Gruvbox");
+        assert_eq!(parsed.ghostty_theme, default_ghostty_theme());
     }
 
     #[test]

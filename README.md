@@ -23,7 +23,9 @@ entirely and use syntect for direct syntax highlighting.
   `target`, `.git`, etc.) in the fzf picker with `Ctrl-v` (requires `fd`)
 - **Scrollback navigation** -- PgUp/PgDn, Home/End, arrow keys, `j`/`k`
 - **Fuzzy heading jump** -- press `s` to search headings via fzf
-- **Theme persistence** -- saved to `~/.config/reed/preferences.toml`
+- **Theme persistence** -- saved to `~/.config/reed/preferences.toml`; Ghostty
+  gets its own `ghostty_theme` field (defaults to "FFE Dark") so dark-mode
+  Ghostty and light-mode terminals coexist
 - **Ghostty detection** -- auto-selects "FFE Dark" in Ghostty terminal
 - **Pipe-friendly** -- `reed --print FILE` dumps themed output to stdout
 
@@ -104,7 +106,7 @@ src/
 
 ```sh
 cargo build      # compile (requires Zig 0.15.x)
-cargo test       # run 72 unit tests
+cargo test       # run 85 unit tests
 cargo clippy     # lint
 cargo fmt        # format
 ```

@@ -81,7 +81,7 @@ fn main() -> Result<()> {
     // Print fzf header line and exit (used by transform-header).
     if cli.print_header {
         let prefs = config::load_preferences();
-        let theme = &theme::THEMES[theme::theme_index_by_name(&prefs.theme)];
+        let theme = &theme::THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         print!("{}", viewer::fzf_header_line(theme));
         return Ok(());
     }
@@ -153,18 +153,16 @@ fn main() -> Result<()> {
 
 /// Cycle to the next or previous theme, save the preference, and exit.
 fn cycle_theme(forward: bool) -> Result<()> {
-    let prefs = config::load_preferences();
-    let current = theme::theme_index_by_name(&prefs.theme);
+    let mut prefs = config::load_preferences();
+    let current = theme::theme_index_by_name(config::active_theme(&prefs));
     let len = theme::THEMES.len();
     let next = if forward {
         (current + 1) % len
     } else {
         (current + len - 1) % len
     };
-    let new_prefs = config::Preferences {
-        theme: theme::THEMES[next].name.to_string(),
-    };
-    config::save_preferences(&new_prefs).context("failed to save theme preference")?;
+    config::set_active_theme(&mut prefs, theme::THEMES[next].name);
+    config::save_preferences(&prefs).context("failed to save theme preference")?;
     Ok(())
 }
 
@@ -181,9 +179,8 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     // If the user passed --theme, save it as the current preference so the
     // preview command (which reads from prefs) picks it up.
     if let Some(t) = theme {
-        let prefs = config::Preferences {
-            theme: t.to_string(),
-        };
+        let mut prefs = config::load_preferences();
+        config::set_active_theme(&mut prefs, t);
         config::save_preferences(&prefs).context("failed to save theme preference")?;
     }
 
@@ -272,7 +269,8 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         // Build the initial header from current preferences (may have changed
         // via theme cycling in the previous iteration).
         let prefs = config::load_preferences();
-        let initial_theme = &theme::THEMES[theme::theme_index_by_name(&prefs.theme)];
+        let initial_theme =
+            &theme::THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         let initial_header = viewer::fzf_header_line(initial_theme);
 
         let mut fzf = Command::new("fzf");
