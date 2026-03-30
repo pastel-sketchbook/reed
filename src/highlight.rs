@@ -28,6 +28,9 @@ const TS_SYNTAX: &str = include_str!("../syntaxes/TypeScript.sublime-syntax");
 /// TSX `.sublime-syntax` — standalone TypeScript + JSX (no v2 `extends`).
 const TSX_SYNTAX: &str = include_str!("../syntaxes/TSX.sublime-syntax");
 
+/// Elixir `.sublime-syntax` — covers core Elixir language features.
+const ELIXIR_SYNTAX: &str = include_str!("../syntaxes/Elixir.sublime-syntax");
+
 // ── Lazy-loaded syntect resources ────────────────────────────────
 
 /// Default syntaxes shipped with syntect.
@@ -45,6 +48,7 @@ fn custom_syntax_set() -> &'static SyntaxSet {
             (ZIG_SYNTAX, "Zig"),
             (TS_SYNTAX, "TypeScript"),
             (TSX_SYNTAX, "TSX"),
+            (ELIXIR_SYNTAX, "Elixir"),
         ] {
             match SyntaxDefinition::load_from_str(src, true, Some("syntaxes")) {
                 Ok(def) => builder.add(def),
@@ -736,6 +740,88 @@ def bar():
         assert!(
             code_section.contains("\x1b["),
             "tsx code block should be highlighted"
+        );
+    }
+
+    #[test]
+    fn find_syntax_resolves_elixir() {
+        assert!(
+            find_syntax("elixir").is_some(),
+            "elixir should resolve by name"
+        );
+        assert!(
+            find_syntax("ex").is_some(),
+            "ex should resolve by extension"
+        );
+        assert!(
+            find_syntax("exs").is_some(),
+            "exs should resolve by extension"
+        );
+    }
+
+    #[test]
+    fn highlight_elixir_code() {
+        let src = concat!(
+            "defmodule Greeter do\n",
+            "  @moduledoc \"A simple greeter.\"\n",
+            "\n",
+            "  def hello(name) do\n",
+            "    \"Hello, #{name}!\"\n",
+            "  end\n",
+            "end\n",
+        );
+        let dark_bg = Color::Rgb {
+            r: 30,
+            g: 30,
+            b: 30,
+        };
+        let result = highlight_code(src, "elixir", dark_bg);
+        assert!(result.is_some(), "Elixir should be recognized");
+        let highlighted = result.unwrap();
+        assert!(
+            highlighted.contains("\x1b["),
+            "output should contain ANSI escapes"
+        );
+    }
+
+    #[test]
+    fn highlight_elixir_fenced_block() {
+        let md = concat!(
+            "# Example\n",
+            "\n",
+            "```elixir\n",
+            "defmodule Math do\n",
+            "  def add(a, b), do: a + b\n",
+            "end\n",
+            "```\n",
+        );
+        let dark_bg = Color::Rgb {
+            r: 30,
+            g: 30,
+            b: 30,
+        };
+        let result = highlight_code_blocks(md, dark_bg);
+        assert!(result.contains("```elixir"), "fence should be preserved");
+        let code_section: String = result
+            .lines()
+            .skip_while(|l| !l.contains("```elixir"))
+            .skip(1)
+            .take_while(|l| !l.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code_section.contains("\x1b["),
+            "elixir code block should be highlighted"
+        );
+    }
+
+    #[test]
+    fn lang_for_path_elixir_extensions() {
+        use std::path::Path;
+        assert_eq!(lang_for_path(Path::new("app.ex")), Some("ex".to_string()));
+        assert_eq!(
+            lang_for_path(Path::new("test_helper.exs")),
+            Some("exs".to_string())
         );
     }
 

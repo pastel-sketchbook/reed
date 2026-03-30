@@ -1,0 +1,313 @@
+%YAML 1.2
+---
+# Elixir language syntax definition for syntect.
+# Based on the Elixir language specification.
+name: Elixir
+file_extensions:
+  - ex
+  - exs
+  - heex
+scope: source.elixir
+contexts:
+  main:
+    - include: comments
+    - include: module_attribute
+    - include: sigils
+    - include: heredoc_double
+    - include: heredoc_single
+    - include: strings
+    - include: charlists
+    - include: atoms
+    - include: numbers
+    - include: keywords
+    - include: operators
+    - include: module_names
+    - include: function_calls
+    - include: variables
+    - include: punctuation
+
+  # ── Comments ──────────────────────────────────────────────────
+  comments:
+    - match: '#.*$'
+      scope: comment.line.number-sign.elixir
+
+  # ── Module attributes (@doc, @spec, @moduledoc, etc.) ────────
+  module_attribute:
+    - match: '@[a-zA-Z_]\w*'
+      scope: variable.other.attribute.elixir
+
+  # ── Keywords ──────────────────────────────────────────────────
+  keywords:
+    # Definition keywords
+    - match: \b(defmodule|defprotocol|defimpl|defstruct|defexception|defdelegate|defoverridable)\b
+      scope: keyword.declaration.module.elixir
+    - match: \b(def|defp|defmacro|defmacrop|defguard|defguardp)\b
+      scope: keyword.declaration.function.elixir
+    # Control flow
+    - match: \b(if|else|unless|case|cond|with|for|receive|try|rescue|catch|after|raise|reraise|throw)\b
+      scope: keyword.control.elixir
+    - match: \b(do|end|fn)\b
+      scope: keyword.control.elixir
+    # Module / import
+    - match: \b(import|require|use|alias)\b
+      scope: keyword.control.import.elixir
+    # Special values
+    - match: \b(nil|true|false)\b
+      scope: constant.language.elixir
+    - match: \b(when|and|or|not|in)\b
+      scope: keyword.operator.logical.elixir
+    - match: \b(quote|unquote|unquote_splicing|super|__MODULE__|__DIR__|__ENV__|__CALLER__|__STACKTRACE__)\b
+      scope: keyword.other.special.elixir
+
+  # ── Operators ─────────────────────────────────────────────────
+  operators:
+    - match: '->|<-'
+      scope: keyword.operator.arrow.elixir
+    - match: '\|>'
+      scope: keyword.operator.pipe.elixir
+    - match: '\\\\' # default arg operator
+      scope: keyword.operator.default.elixir
+    - match: '\.\.\.|\.\.'
+      scope: keyword.operator.range.elixir
+    - match: '<>|\+\+|--'
+      scope: keyword.operator.list.elixir
+    - match: '=~|===?|!==?|<=?|>=?'
+      scope: keyword.operator.comparison.elixir
+    - match: '&&?|\|\|?|!'
+      scope: keyword.operator.logical.elixir
+    - match: '[+\-*/]'
+      scope: keyword.operator.arithmetic.elixir
+    - match: '='
+      scope: keyword.operator.assignment.elixir
+    - match: '\|'
+      scope: keyword.operator.cons.elixir
+    - match: '&'
+      scope: keyword.operator.capture.elixir
+    - match: '::'
+      scope: keyword.operator.type.elixir
+    - match: '=>'
+      scope: keyword.operator.map.elixir
+
+  # ── Module names (CamelCase) ──────────────────────────────────
+  module_names:
+    - match: '\b[A-Z]\w*\b'
+      scope: entity.name.type.module.elixir
+
+  # ── Function calls ────────────────────────────────────────────
+  function_calls:
+    - match: '([a-z_]\w*[!?]?)\s*(?=\()'
+      captures:
+        1: entity.name.function.elixir
+
+  # ── Variables / identifiers ───────────────────────────────────
+  variables:
+    - match: '_\w+'
+      scope: variable.other.unused.elixir
+    - match: '\b_\b'
+      scope: variable.language.wildcard.elixir
+
+  # ── Atoms ─────────────────────────────────────────────────────
+  atoms:
+    # Quoted atom
+    - match: ':"'
+      scope: punctuation.definition.atom.begin.elixir
+      push:
+        - meta_scope: constant.other.symbol.elixir
+        - match: '"'
+          scope: punctuation.definition.atom.end.elixir
+          pop: true
+        - include: string_interpolation
+        - include: string_escapes
+    # Simple atom
+    - match: ":'"
+      scope: punctuation.definition.atom.begin.elixir
+      push:
+        - meta_scope: constant.other.symbol.elixir
+        - match: "'"
+          scope: punctuation.definition.atom.end.elixir
+          pop: true
+    # Bare atom
+    - match: ':(?:[a-zA-Z_]\w*[!?]?|<>|===?|!==?|<=?|>=?|&&?|\|\|?|\+\+?|--?|\*|/|\\\\|~|->|<-|\.\.|\.\.\.|\|>|=~|!|@|%\{\}|%|\^)'
+      scope: constant.other.symbol.elixir
+    # Keyword-style atom (key: value)
+    - match: '\b([a-zA-Z_]\w*[!?]?)(:)(?=\s)'
+      captures:
+        1: constant.other.keyword.elixir
+        2: punctuation.separator.key-value.elixir
+
+  # ── Numbers ───────────────────────────────────────────────────
+  numbers:
+    # Binary
+    - match: '\b0b[01](_?[01])*\b'
+      scope: constant.numeric.binary.elixir
+    # Octal
+    - match: '\b0o[0-7](_?[0-7])*\b'
+      scope: constant.numeric.octal.elixir
+    # Hex
+    - match: '\b0x[\da-fA-F](_?[\da-fA-F])*\b'
+      scope: constant.numeric.hex.elixir
+    # Float
+    - match: '\b\d(_?\d)*\.\d(_?\d)*([eE][+-]?\d(_?\d)*)?\b'
+      scope: constant.numeric.float.elixir
+    # Integer
+    - match: '\b\d(_?\d)*\b'
+      scope: constant.numeric.integer.elixir
+    # Char literal  ?a  ?\n
+    - match: '\?\\?.'
+      scope: constant.numeric.char.elixir
+
+  # ── Sigils ────────────────────────────────────────────────────
+  sigils:
+    # Heredoc sigils ~s""", ~r""", etc.
+    - match: '~[a-zA-Z]"""'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '"""[a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    - match: "~[a-zA-Z]'''"
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: "'''[a-zA-Z]*"
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    # Inline sigils with various delimiters
+    - match: '~[a-zA-Z]\('
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '\)[a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    - match: '~[a-zA-Z]\['
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '\][a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    - match: '~[a-zA-Z]\{'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '\}[a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    - match: '~[a-zA-Z]<'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '>[a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    - match: '~[a-zA-Z]/'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '/[a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    - match: '~[a-zA-Z]\|'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '\|[a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+    - match: '~[a-zA-Z]"'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.other.sigil.elixir
+        - match: '"[a-zA-Z]*'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+
+  # ── Heredoc (triple-quoted) strings ───────────────────────────
+  heredoc_double:
+    - match: '"""'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.triple.double.elixir
+        - match: '"""'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+        - include: string_escapes
+
+  heredoc_single:
+    - match: "'''"
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.triple.single.elixir
+        - match: "'''"
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+
+  # ── Strings ───────────────────────────────────────────────────
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.double.elixir
+        - match: '"'
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+        - include: string_escapes
+
+  # ── Charlists (single-quoted) ─────────────────────────────────
+  charlists:
+    - match: "'"
+      scope: punctuation.definition.string.begin.elixir
+      push:
+        - meta_scope: string.quoted.single.elixir
+        - match: "'"
+          scope: punctuation.definition.string.end.elixir
+          pop: true
+        - include: string_interpolation
+        - include: string_escapes
+
+  # ── String interpolation #{...} ───────────────────────────────
+  string_interpolation:
+    - match: '#\{'
+      scope: punctuation.section.interpolation.begin.elixir
+      push:
+        - meta_scope: meta.interpolation.elixir
+        - clear_scopes: 1
+        - match: '\}'
+          scope: punctuation.section.interpolation.end.elixir
+          pop: true
+        - include: main
+
+  # ── String escape sequences ───────────────────────────────────
+  string_escapes:
+    - match: '\\[abdefnrstv\\''"/]'
+      scope: constant.character.escape.elixir
+    - match: '\\x[\da-fA-F]{2}'
+      scope: constant.character.escape.hex.elixir
+    - match: '\\u\{[\da-fA-F]+\}'
+      scope: constant.character.escape.unicode.elixir
+
+  # ── Punctuation ───────────────────────────────────────────────
+  punctuation:
+    - match: '[\(\)]'
+      scope: punctuation.section.parens.elixir
+    - match: '[\[\]]'
+      scope: punctuation.section.brackets.elixir
+    - match: '[\{\}]'
+      scope: punctuation.section.braces.elixir
+    - match: ','
+      scope: punctuation.separator.comma.elixir
+    - match: '\.'
+      scope: punctuation.accessor.dot.elixir
