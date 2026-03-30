@@ -1,0 +1,408 @@
+%YAML 1.2
+---
+# Standalone TSX (TypeScript + JSX) syntax definition for syntect.
+# Does not use Sublime Text v2 features (extends, meta_prepend, branch_point).
+name: TSX
+file_extensions:
+  - tsx
+scope: source.tsx
+
+contexts:
+  main:
+    - include: comments
+    - include: decorators
+    - include: jsx-tags
+    - include: strings
+    - include: template-strings
+    - include: regex
+    - include: numbers
+    - include: constants
+    - include: type-declarations
+    - include: keywords
+    - include: storage
+    - include: operators
+    - include: punctuation
+    - include: function-calls
+    - include: identifiers
+
+  # ── Comments ──────────────────────────────────────────────────────
+
+  comments:
+    - match: '///.*$'
+      scope: comment.line.triple-slash.tsx
+    - match: //.*$
+      scope: comment.line.double-slash.tsx
+    - match: /\*
+      scope: punctuation.definition.comment.begin.tsx
+      push: block-comment
+
+  block-comment:
+    - meta_scope: comment.block.tsx
+    - match: \*/
+      scope: punctuation.definition.comment.end.tsx
+      pop: true
+    - match: .
+      # consume anything inside comment
+
+  # ── Decorators ────────────────────────────────────────────────────
+
+  decorators:
+    - match: '@[a-zA-Z_$][\w$]*'
+      scope: meta.decorator.tsx entity.name.function.decorator.tsx
+
+  # ── JSX ───────────────────────────────────────────────────────────
+
+  jsx-tags:
+    # Fragment opening: <>
+    - match: '(<)(>)'
+      captures:
+        1: punctuation.definition.tag.begin.tsx
+        2: punctuation.definition.tag.end.tsx
+      push: jsx-body
+    # Fragment closing: </>
+    - match: '(</)(>)'
+      captures:
+        1: punctuation.definition.tag.begin.tsx
+        2: punctuation.definition.tag.end.tsx
+    # Closing tag: </Component>
+    - match: '(</)([A-Za-z_$][\w$.-]*)(>)'
+      captures:
+        1: punctuation.definition.tag.begin.tsx
+        2: entity.name.tag.tsx
+        3: punctuation.definition.tag.end.tsx
+    # Opening tag: <Component or <div
+    - match: '(<)(?=[A-Za-z_$])'
+      captures:
+        1: punctuation.definition.tag.begin.tsx
+      push: jsx-tag-open
+
+  jsx-tag-open:
+    - meta_scope: meta.tag.tsx
+    # Native HTML tag (lowercase)
+    - match: '([a-z][\w-]*)'
+      scope: entity.name.tag.native.tsx
+      set: jsx-tag-attributes
+    # Component tag (uppercase or dotted)
+    - match: '([A-Z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)'
+      scope: entity.name.tag.component.tsx
+      set: jsx-tag-attributes
+    - match: (?=\S)
+      pop: true
+
+  jsx-tag-attributes:
+    - meta_content_scope: meta.tag.attributes.tsx
+    # Self-closing tag
+    - match: '/>'
+      scope: punctuation.definition.tag.end.tsx
+      pop: true
+    # Tag end, enter body
+    - match: '>'
+      scope: punctuation.definition.tag.end.tsx
+      set: jsx-body
+    # Spread attribute
+    - match: '\.\.\.'
+      scope: keyword.operator.spread.tsx
+    # Attribute with expression value
+    - match: '([a-zA-Z_$][\w$-]*)\s*(=)\s*(?=\{)'
+      captures:
+        1: entity.other.attribute-name.tsx
+        2: punctuation.separator.key-value.tsx
+    # Attribute with string value
+    - match: '([a-zA-Z_$][\w$-]*)\s*(=)\s*'
+      captures:
+        1: entity.other.attribute-name.tsx
+        2: punctuation.separator.key-value.tsx
+      push: jsx-attribute-value
+    # Boolean attribute (no value)
+    - match: '[a-zA-Z_$][\w$-]*'
+      scope: entity.other.attribute-name.tsx
+    # Expression attribute value
+    - match: '\{'
+      scope: punctuation.section.interpolation.begin.tsx
+      push: jsx-expression
+
+  jsx-attribute-value:
+    - match: '"'
+      scope: punctuation.definition.string.begin.tsx
+      set: jsx-double-quoted-string
+    - match: "'"
+      scope: punctuation.definition.string.begin.tsx
+      set: jsx-single-quoted-string
+    - match: '\{'
+      scope: punctuation.section.interpolation.begin.tsx
+      set: jsx-expression
+    - match: (?=\S)
+      pop: true
+
+  jsx-double-quoted-string:
+    - meta_scope: string.quoted.double.tsx
+    - match: '&[a-zA-Z]+;|&#\d+;'
+      scope: constant.character.escape.tsx
+    - match: '"'
+      scope: punctuation.definition.string.end.tsx
+      pop: true
+
+  jsx-single-quoted-string:
+    - meta_scope: string.quoted.single.tsx
+    - match: '&[a-zA-Z]+;|&#\d+;'
+      scope: constant.character.escape.tsx
+    - match: "'"
+      scope: punctuation.definition.string.end.tsx
+      pop: true
+
+  jsx-body:
+    - meta_content_scope: meta.jsx.tsx
+    # Closing tag (signals end of body)
+    - match: '(?=</)'
+      pop: true
+    # Nested opening tag
+    - include: jsx-tags
+    # HTML entities
+    - match: '&[a-zA-Z]+;|&#\d+;'
+      scope: constant.character.escape.tsx
+    # Expression interpolation
+    - match: '\{'
+      scope: punctuation.section.interpolation.begin.tsx
+      push: jsx-expression
+
+  jsx-expression:
+    - meta_scope: meta.interpolation.tsx
+    - meta_content_scope: source.tsx.embedded
+    - match: '\}'
+      scope: punctuation.section.interpolation.end.tsx
+      pop: true
+    - include: main
+
+  # ── Strings ───────────────────────────────────────────────────────
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.tsx
+      push: double-quoted-string
+    - match: "'"
+      scope: punctuation.definition.string.begin.tsx
+      push: single-quoted-string
+
+  double-quoted-string:
+    - meta_scope: string.quoted.double.tsx
+    - match: \\.
+      scope: constant.character.escape.tsx
+    - match: '"'
+      scope: punctuation.definition.string.end.tsx
+      pop: true
+    - match: \n
+      scope: invalid.illegal.newline.tsx
+      pop: true
+
+  single-quoted-string:
+    - meta_scope: string.quoted.single.tsx
+    - match: \\.
+      scope: constant.character.escape.tsx
+    - match: "'"
+      scope: punctuation.definition.string.end.tsx
+      pop: true
+    - match: \n
+      scope: invalid.illegal.newline.tsx
+      pop: true
+
+  # ── Template strings ──────────────────────────────────────────────
+
+  template-strings:
+    - match: '`'
+      scope: punctuation.definition.string.begin.tsx
+      push: template-string-body
+
+  template-string-body:
+    - meta_scope: string.quoted.other.tsx
+    - match: '`'
+      scope: punctuation.definition.string.end.tsx
+      pop: true
+    - match: \\.
+      scope: constant.character.escape.tsx
+    - match: '\$\{'
+      scope: punctuation.section.interpolation.begin.tsx
+      push: template-interpolation
+
+  template-interpolation:
+    - clear_scopes: 1
+    - meta_scope: meta.interpolation.tsx
+    - meta_content_scope: source.tsx.embedded
+    - match: '\}'
+      scope: punctuation.section.interpolation.end.tsx
+      pop: true
+    - include: main
+
+  # ── Regular expressions ───────────────────────────────────────────
+
+  regex:
+    - match: '(?<=[=(:,;\[!&|?+\-~*/%^>]|^|return|case|typeof|void|delete|throw|in|of|instanceof|new|await)\s*(/(?![/*]))'
+      captures:
+        1: punctuation.definition.string.begin.tsx
+      push: regex-body
+
+  regex-body:
+    - meta_scope: string.regexp.tsx
+    - match: '(/)[gimsuy]*'
+      captures:
+        1: punctuation.definition.string.end.tsx
+      pop: true
+    - match: \\.
+      scope: constant.character.escape.tsx
+    - match: \n
+      pop: true
+
+  # ── Numbers ───────────────────────────────────────────────────────
+
+  numbers:
+    - match: '\b0[xX][0-9a-fA-F][0-9a-fA-F_]*n?\b'
+      scope: constant.numeric.hex.tsx
+    - match: '\b0[oO][0-7][0-7_]*n?\b'
+      scope: constant.numeric.octal.tsx
+    - match: '\b0[bB][01][01_]*n?\b'
+      scope: constant.numeric.binary.tsx
+    - match: '\b[0-9][0-9_]*\.?[0-9_]*(?:[eE][+-]?[0-9_]+)?n?\b'
+      scope: constant.numeric.decimal.tsx
+    - match: '\.[0-9][0-9_]*(?:[eE][+-]?[0-9_]+)?\b'
+      scope: constant.numeric.decimal.tsx
+
+  # ── Constants ─────────────────────────────────────────────────────
+
+  constants:
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.tsx
+    - match: '\b(null)\b'
+      scope: constant.language.null.tsx
+    - match: '\b(undefined)\b'
+      scope: constant.language.undefined.tsx
+    - match: '\b(NaN|Infinity)\b'
+      scope: constant.language.tsx
+    - match: '\b(this)\b'
+      scope: variable.language.this.tsx
+    - match: '\b(super)\b'
+      scope: variable.language.super.tsx
+    - match: '\b(arguments)\b'
+      scope: variable.language.arguments.tsx
+
+  # ── Type declarations & annotations ───────────────────────────────
+
+  type-declarations:
+    - match: '\b(interface)\b'
+      scope: keyword.declaration.interface.tsx
+    - match: '\b(type)\b(?=\s+[A-Za-z_$])'
+      scope: keyword.declaration.type.tsx
+    - match: '\b(enum)\b'
+      scope: keyword.declaration.enum.tsx
+    - match: '\b(namespace|module)\b'
+      scope: keyword.declaration.namespace.tsx
+    - match: '\b(string|number|boolean|symbol|bigint|object)\b(?=\s*[&|;,)\]}>?:=]|\s*$|\s*\{|\s*\[)'
+      scope: support.type.primitive.tsx
+    - match: '\b(any|void|never|unknown)\b'
+      scope: support.type.tsx
+    - match: '\b(Array|Map|Set|WeakMap|WeakSet|Promise|Record|Partial|Required|Readonly|Pick|Omit|Exclude|Extract|NonNullable|ReturnType|InstanceType|Parameters|ConstructorParameters|Awaited)\b(?=\s*<)'
+      scope: support.class.tsx
+
+  # ── Keywords ──────────────────────────────────────────────────────
+
+  keywords:
+    - match: '\b(if|else|switch|case|default|for|while|do|break|continue|return|throw|try|catch|finally|with)\b'
+      scope: keyword.control.tsx
+    - match: '\b(import|export|from|as|default)\b'
+      scope: keyword.control.import-export.tsx
+    - match: '\b(async|await|yield)\b'
+      scope: keyword.control.flow.tsx
+    - match: '\b(new|delete|typeof|instanceof|in|of|void|keyof|infer)\b'
+      scope: keyword.operator.tsx
+    - match: '\b(is)\b'
+      scope: keyword.operator.type.tsx
+    - match: '\b(as)\b'
+      scope: keyword.operator.type.tsx
+    - match: '\b(satisfies)\b'
+      scope: keyword.operator.type.tsx
+    - match: '\b(var|let|const)\b'
+      scope: keyword.declaration.tsx
+    - match: '\b(function)\b'
+      scope: keyword.declaration.function.tsx
+    - match: '\b(class)\b'
+      scope: keyword.declaration.class.tsx
+
+  # ── Storage modifiers ─────────────────────────────────────────────
+
+  storage:
+    - match: '\b(abstract|declare|implements|extends|override)\b'
+      scope: storage.modifier.tsx
+    - match: '\b(public|private|protected|readonly|static)\b'
+      scope: storage.modifier.tsx
+    - match: '\b(get|set)\b(?=\s+[\w$])'
+      scope: storage.type.accessor.tsx
+    - match: '=>'
+      scope: keyword.declaration.function.arrow.tsx
+
+  # ── Operators ─────────────────────────────────────────────────────
+
+  operators:
+    - match: '===|!==|==|!='
+      scope: keyword.operator.comparison.tsx
+    - match: '<=|>='
+      scope: keyword.operator.comparison.tsx
+    - match: '&&|\|\||\?\?|!'
+      scope: keyword.operator.logical.tsx
+    - match: '\+\+|--'
+      scope: keyword.operator.arithmetic.tsx
+    - match: '[+\-*/%]'
+      scope: keyword.operator.arithmetic.tsx
+    - match: '\?\.'
+      scope: keyword.operator.accessor.optional.tsx
+    - match: '\.\.\.'
+      scope: keyword.operator.spread.tsx
+    - match: '\?'
+      scope: keyword.operator.ternary.tsx
+    - match: ':'
+      scope: punctuation.separator.tsx
+    - match: '>>>=|>>>|>>=|<<=|&&=|\|\|=|\?\?='
+      scope: keyword.operator.assignment.tsx
+    - match: '[+\-*/%&|^]=|='
+      scope: keyword.operator.assignment.tsx
+    - match: '>>>|>>|<<'
+      scope: keyword.operator.bitwise.tsx
+    - match: '[&|^~]'
+      scope: keyword.operator.bitwise.tsx
+
+  # ── Punctuation ───────────────────────────────────────────────────
+
+  punctuation:
+    - match: '\{'
+      scope: punctuation.section.block.begin.tsx
+    - match: '\}'
+      scope: punctuation.section.block.end.tsx
+    - match: '\('
+      scope: punctuation.section.group.begin.tsx
+    - match: '\)'
+      scope: punctuation.section.group.end.tsx
+    - match: '\['
+      scope: punctuation.section.brackets.begin.tsx
+    - match: '\]'
+      scope: punctuation.section.brackets.end.tsx
+    - match: ;
+      scope: punctuation.terminator.statement.tsx
+    - match: ','
+      scope: punctuation.separator.comma.tsx
+    - match: '\.'
+      scope: punctuation.accessor.dot.tsx
+
+  # ── Function calls ───────────────────────────────────────────────
+
+  function-calls:
+    - match: '\b([a-zA-Z_$][\w$]*)\s*(?=\()'
+      captures:
+        1: variable.function.tsx
+    - match: '\b([a-zA-Z_$][\w$]*)\s*(?=<[^>]*>\s*\()'
+      captures:
+        1: variable.function.tsx
+
+  # ── Identifiers ──────────────────────────────────────────────────
+
+  identifiers:
+    - match: '\b([A-Z][\w$]*)\b'
+      scope: support.class.tsx
+    - match: '\b([a-z_$][\w$]*)\b'
+      scope: variable.other.readwrite.tsx

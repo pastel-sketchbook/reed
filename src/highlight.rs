@@ -22,6 +22,12 @@ use tracing::{debug, warn};
 /// Zig `.sublime-syntax` bundled from ziglang/sublime-zig-language (MIT).
 const ZIG_SYNTAX: &str = include_str!("../syntaxes/Zig.sublime-syntax");
 
+/// TypeScript `.sublime-syntax` — standalone (no v2 `extends`).
+const TS_SYNTAX: &str = include_str!("../syntaxes/TypeScript.sublime-syntax");
+
+/// TSX `.sublime-syntax` — standalone TypeScript + JSX (no v2 `extends`).
+const TSX_SYNTAX: &str = include_str!("../syntaxes/TSX.sublime-syntax");
+
 // ── Lazy-loaded syntect resources ────────────────────────────────
 
 /// Default syntaxes shipped with syntect.
@@ -30,14 +36,20 @@ fn default_syntax_set() -> &'static SyntaxSet {
     SS.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
-/// Additional syntaxes bundled with reed (Zig, etc.).
+/// Additional syntaxes bundled with reed (Zig, TypeScript, TSX, etc.).
 fn custom_syntax_set() -> &'static SyntaxSet {
     static SS: OnceLock<SyntaxSet> = OnceLock::new();
     SS.get_or_init(|| {
         let mut builder = SyntaxSetBuilder::new();
-        match SyntaxDefinition::load_from_str(ZIG_SYNTAX, true, Some("syntaxes")) {
-            Ok(zig) => builder.add(zig),
-            Err(e) => warn!("failed to load bundled Zig syntax: {e}"),
+        for (src, name) in [
+            (ZIG_SYNTAX, "Zig"),
+            (TS_SYNTAX, "TypeScript"),
+            (TSX_SYNTAX, "TSX"),
+        ] {
+            match SyntaxDefinition::load_from_str(src, true, Some("syntaxes")) {
+                Ok(def) => builder.add(def),
+                Err(e) => warn!("failed to load bundled {name} syntax: {e}"),
+            }
         }
         builder.build()
     })
@@ -572,5 +584,166 @@ def bar():
     fn find_syntax_resolves_zig() {
         let result = find_syntax("zig");
         assert!(result.is_some(), "zig should resolve in custom syntax set");
+    }
+
+    #[test]
+    fn find_syntax_resolves_typescript() {
+        // Token name (lowercased from fence tag)
+        assert!(
+            find_syntax("typescript").is_some(),
+            "typescript should resolve by name"
+        );
+        // File extension
+        assert!(
+            find_syntax("ts").is_some(),
+            "ts should resolve by extension"
+        );
+    }
+
+    #[test]
+    fn find_syntax_resolves_tsx() {
+        assert!(
+            find_syntax("tsx").is_some(),
+            "tsx should resolve by name/ext"
+        );
+    }
+
+    #[test]
+    fn highlight_typescript_code() {
+        let src = concat!(
+            "interface User {\n",
+            "  name: string;\n",
+            "  age: number;\n",
+            "}\n",
+            "\n",
+            "function greet(user: User): string {\n",
+            "  return `Hello, ${user.name}`;\n",
+            "}\n",
+        );
+        let dark_bg = Color::Rgb {
+            r: 30,
+            g: 30,
+            b: 30,
+        };
+        let result = highlight_code(src, "typescript", dark_bg);
+        assert!(result.is_some(), "TypeScript should be recognized");
+        let highlighted = result.unwrap();
+        assert!(
+            highlighted.contains("\x1b["),
+            "output should contain ANSI escapes"
+        );
+    }
+
+    #[test]
+    fn highlight_typescript_fenced_block() {
+        let md = concat!(
+            "# Example\n",
+            "\n",
+            "```typescript\n",
+            "const x: number = 42;\n",
+            "```\n",
+        );
+        let dark_bg = Color::Rgb {
+            r: 30,
+            g: 30,
+            b: 30,
+        };
+        let result = highlight_code_blocks(md, dark_bg);
+        assert!(
+            result.contains("```typescript"),
+            "fence should be preserved"
+        );
+        let code_section: String = result
+            .lines()
+            .skip_while(|l| !l.contains("```typescript"))
+            .skip(1)
+            .take_while(|l| !l.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code_section.contains("\x1b["),
+            "typescript code block should be highlighted"
+        );
+    }
+
+    #[test]
+    fn highlight_ts_fenced_block() {
+        let md = "```ts\nconst x: number = 42;\n```\n";
+        let result = highlight_code_blocks(
+            md,
+            Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 30,
+            },
+        );
+        let code_section: String = result
+            .lines()
+            .skip_while(|l| !l.contains("```ts"))
+            .skip(1)
+            .take_while(|l| !l.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code_section.contains("\x1b["),
+            "ts fence tag should trigger highlighting"
+        );
+    }
+
+    #[test]
+    fn highlight_tsx_code() {
+        let src = concat!(
+            "interface Props {\n",
+            "  name: string;\n",
+            "}\n",
+            "\n",
+            "function App({ name }: Props) {\n",
+            "  return <div className=\"app\">{name}</div>;\n",
+            "}\n",
+        );
+        let dark_bg = Color::Rgb {
+            r: 30,
+            g: 30,
+            b: 30,
+        };
+        let result = highlight_code(src, "tsx", dark_bg);
+        assert!(result.is_some(), "TSX should be recognized");
+        let highlighted = result.unwrap();
+        assert!(
+            highlighted.contains("\x1b["),
+            "output should contain ANSI escapes"
+        );
+    }
+
+    #[test]
+    fn highlight_tsx_fenced_block() {
+        let md = "```tsx\nconst el = <div>hello</div>;\n```\n";
+        let result = highlight_code_blocks(
+            md,
+            Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 30,
+            },
+        );
+        let code_section: String = result
+            .lines()
+            .skip_while(|l| !l.contains("```tsx"))
+            .skip(1)
+            .take_while(|l| !l.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code_section.contains("\x1b["),
+            "tsx code block should be highlighted"
+        );
+    }
+
+    #[test]
+    fn lang_for_path_typescript_extensions() {
+        use std::path::Path;
+        assert_eq!(lang_for_path(Path::new("app.ts")), Some("ts".to_string()));
+        assert_eq!(lang_for_path(Path::new("app.tsx")), Some("tsx".to_string()));
+        assert_eq!(lang_for_path(Path::new("app.mts")), Some("mts".to_string()));
     }
 }

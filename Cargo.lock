@@ -552,7 +552,7 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 [[package]]
 name = "libghostty-vt"
 version = "0.1.1"
-source = "git+https://github.com/Uzaaft/libghostty-rs#1a0b54a937a0f81878efe570c9febae42751fd9a"
+source = "git+https://github.com/Uzaaft/libghostty-rs#811cbdd85a99b40a63424a9d247c4f3653c11924"
 dependencies = [
  "bitflags",
  "int-enum",
@@ -562,7 +562,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.1.1"
-source = "git+https://github.com/Uzaaft/libghostty-rs#1a0b54a937a0f81878efe570c9febae42751fd9a"
+source = "git+https://github.com/Uzaaft/libghostty-rs#811cbdd85a99b40a63424a9d247c4f3653c11924"
 
 [[package]]
 name = "libredox"
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "reed"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "base64",
