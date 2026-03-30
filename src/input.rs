@@ -227,6 +227,8 @@ pub fn search_prompt(
         execute!(
             stdout,
             ResetColor,
+            // query length is bounded by terminal width which fits in u16
+            #[allow(clippy::cast_possible_truncation)]
             cursor::MoveTo(1 + query.len() as u16, row),
             cursor::Show
         )?;
@@ -386,6 +388,7 @@ pub fn extract_links(markdown: &str) -> Vec<Link> {
     use regex::Regex;
     use std::sync::LazyLock;
 
+    // OK: constant regex patterns — panics only if the literal patterns are malformed.
     static MD_LINK: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
     static BARE_URL: LazyLock<Regex> =
@@ -487,7 +490,7 @@ pub fn fzf_link_picker(links: &[Link]) -> Result<bool> {
         }
 
         let selected = String::from_utf8_lossy(&output.stdout);
-        let url = selected.trim().split('\t').next().map(|s| s.to_string());
+        let url = selected.trim().split('\t').next().map(ToString::to_string);
         Ok(url)
     })();
 
@@ -626,8 +629,7 @@ pub fn fzf_code_block_picker(blocks: &[CodeBlock]) -> Result<bool> {
         let line_count = block.content.lines().count();
         let _ = writeln!(
             input,
-            "{}\t[{}] ({} lines) {}",
-            i, lang_label, line_count, preview_trunc
+            "{i}\t[{lang_label}] ({line_count} lines) {preview_trunc}"
         );
     }
 

@@ -178,7 +178,22 @@ fn cycle_theme(forward: bool) -> Result<()> {
 /// If stdin is not a TTY (i.e. something is piped in), candidates are
 /// buffered and re-fed to fzf on each iteration so the picker can be
 /// re-launched after the viewer exits.
+#[expect(clippy::too_many_lines)]
 fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
+    // Vendor directories to exclude when the filter is active.
+    const VENDOR_DIRS: &[&str] = &[
+        "node_modules",
+        "vendor",
+        ".git",
+        "target",
+        "build",
+        "dist",
+        ".next",
+        "__pycache__",
+        ".venv",
+        "venv",
+    ];
+
     // If the user passed --theme, save it as the current preference so the
     // preview command (which reads from prefs) picks it up.
     if let Some(t) = theme {
@@ -189,14 +204,14 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
 
     // If stdin is piped, buffer the candidates so we can re-feed them to fzf
     // on each loop iteration (the pipe is consumed on first read).
-    let piped_candidates = if !std::io::stdin().is_terminal() {
+    let piped_candidates = if std::io::stdin().is_terminal() {
+        None
+    } else {
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
             .context("failed to read piped candidates")?;
         Some(buf)
-    } else {
-        None
     };
 
     // Resolve our own binary path so the preview command works regardless
@@ -214,20 +229,6 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
 
     // Header command: prints the styled shortcuts + theme name line.
     let header_cmd = format!("{} --print-header", shell_escape(&reed_bin));
-
-    // Vendor directories to exclude when the filter is active.
-    const VENDOR_DIRS: &[&str] = &[
-        "node_modules",
-        "vendor",
-        ".git",
-        "target",
-        "build",
-        "dist",
-        ".next",
-        "__pycache__",
-        ".venv",
-        "venv",
-    ];
 
     // Detect fd/fdfind once for the vendor-filter toggle.
     let fd_bin = if Command::new("fd")
@@ -254,10 +255,11 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
 
     // Build the two fd commands: filtered (excludes vendor) and unfiltered.
     let (fd_filtered, fd_unfiltered) = if let Some(bin) = fd_bin {
-        let excludes: String = VENDOR_DIRS
-            .iter()
-            .map(|d| format!(" --exclude {d}"))
-            .collect();
+        let excludes = VENDOR_DIRS.iter().fold(String::new(), |mut acc, d| {
+            use std::fmt::Write;
+            let _ = write!(acc, " --exclude {d}");
+            acc
+        });
         (
             format!("{bin} --type f --hidden{excludes}"),
             format!("{bin} --type f --hidden"),

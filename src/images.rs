@@ -124,6 +124,7 @@ fn libc_stdout() -> i32 {
 /// Only matches images that appear on their own line (possibly with leading
 /// whitespace). Inline images mixed with text are ignored for now.
 pub fn extract_images(markdown: &str, base_dir: &Path) -> Vec<ImageRef> {
+    // OK: constant regex pattern — panics only if the literal pattern is malformed.
     let re = Regex::new(r"(?m)^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$").expect("valid regex");
     let mut refs = Vec::new();
 
@@ -374,8 +375,15 @@ const SIXEL_MAX_COLORS: usize = 256;
 /// median-cut approximation. Returns the palette (RGB triples) and an
 /// index buffer mapping each pixel to a palette entry.
 fn quantize_to_palette(rgba: &[u8], width: u32, height: u32) -> (Vec<[u8; 3]>, Vec<u8>) {
-    let pixel_count = (width * height) as usize;
-    assert_eq!(rgba.len(), pixel_count * 4);
+    // Use u64 intermediate to avoid u32 overflow on large images, then
+    // truncate to usize (safe: images exceeding usize on 32-bit targets
+    // would fail allocation anyway).
+    #[allow(clippy::cast_possible_truncation)]
+    let pixel_count = (u64::from(width) * u64::from(height)) as usize;
+    debug_assert_eq!(rgba.len(), pixel_count * 4);
+    if rgba.len() != pixel_count * 4 {
+        return (Vec::new(), Vec::new());
+    }
 
     // Collect unique-ish colors by bucketing into a 5-5-5 color space.
     let mut histogram: std::collections::HashMap<u16, (u64, u64, u64, u64)> =
@@ -398,6 +406,7 @@ fn quantize_to_palette(rgba: &[u8], width: u32, height: u32) -> (Vec<[u8; 3]>, V
     buckets.sort_by(|a, b| b.1.3.cmp(&a.1.3)); // most frequent first
     buckets.truncate(SIXEL_MAX_COLORS);
 
+    #[allow(clippy::cast_possible_truncation)] // r/g/b sums divided by count always fit in u8
     let palette: Vec<[u8; 3]> = buckets
         .iter()
         .map(|(_, (r, g, b, count))| {
@@ -413,7 +422,10 @@ fn quantize_to_palette(rgba: &[u8], width: u32, height: u32) -> (Vec<[u8; 3]>, V
     let mut key_to_idx: std::collections::HashMap<u16, u8> =
         std::collections::HashMap::with_capacity(buckets.len());
     for (i, (key, _)) in buckets.iter().enumerate() {
-        key_to_idx.insert(*key, i as u8);
+        // palette is truncated to SIXEL_MAX_COLORS (256), so index always fits in u8
+        #[allow(clippy::cast_possible_truncation)]
+        let idx = i as u8;
+        key_to_idx.insert(*key, idx);
     }
 
     // Map each pixel to the nearest palette entry (by bucket key).
@@ -474,6 +486,8 @@ pub fn emit_sixel_image<W: Write>(
         // For each color in the palette, emit a row of sixel characters.
         let mut any_color_emitted = false;
         for (color_idx, _) in palette.iter().enumerate() {
+            // palette has at most SIXEL_MAX_COLORS (256) entries, so index fits in u8
+            #[allow(clippy::cast_possible_truncation)]
             let color_idx_u8 = color_idx as u8;
 
             // Build sixel characters for this color across the width.

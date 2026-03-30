@@ -307,7 +307,7 @@ impl SearchState {
 
     /// Returns `true` if the query contains any uppercase character (smart-case).
     fn is_case_sensitive(query: &str) -> bool {
-        query.chars().any(|c| c.is_uppercase())
+        query.chars().any(char::is_uppercase)
     }
 
     /// Check if `haystack` contains `needle` with smart-case:
@@ -873,7 +873,7 @@ fn persist_theme(theme_index: usize) {
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_inner_loop<'a>(
     term: &mut Terminal<'a, 'a>,
     render_state: &mut RenderState<'a>,
@@ -1403,7 +1403,7 @@ fn draw_header(
     // Buffer ring indicator (e.g. " [2/5]") when multiple buffers are open.
     let buf_indicator = if let Some((cur, total)) = buffer_info {
         if total > 1 {
-            format!(" [{}/{}]", cur, total)
+            format!(" [{cur}/{total}]")
         } else {
             String::new()
         }
@@ -1481,19 +1481,17 @@ fn draw_footer(
             .sum::<usize>();
 
     // Right side: search info (if active) + theme name + right padding.
-    let search_info = if !search.query.is_empty() {
-        if search.match_rows.is_empty() {
-            format!("[/{}: no matches] ", search.query)
-        } else {
-            format!(
-                "[/{}: {}/{}] ",
-                search.query,
-                search.current + 1,
-                search.match_rows.len(),
-            )
-        }
-    } else {
+    let search_info = if search.query.is_empty() {
         String::new()
+    } else if search.match_rows.is_empty() {
+        format!("[/{}: no matches] ", search.query)
+    } else {
+        format!(
+            "[/{}: {}/{}] ",
+            search.query,
+            search.current + 1,
+            search.match_rows.len(),
+        )
     };
 
     let right = format!("{search_info}{}{pad}", theme.name);

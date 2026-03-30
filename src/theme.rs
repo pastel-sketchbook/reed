@@ -65,7 +65,10 @@ impl Theme {
         };
         // Blend: 85% bg + 15% accent
         let blend = |base: u8, tint: u8| -> u8 {
-            ((u16::from(base) * 85 + u16::from(tint) * 15) / 100) as u8
+            // Result is always <= 255 since both inputs are u8
+            #[allow(clippy::cast_possible_truncation)]
+            let v = ((u16::from(base) * 85 + u16::from(tint) * 15) / 100) as u8;
+            v
         };
         Color::Rgb {
             r: blend(br, ar).max(20),
@@ -86,7 +89,10 @@ impl Theme {
         };
         // Blend: 65% bg + 35% accent
         let blend = |base: u8, tint: u8| -> u8 {
-            ((u16::from(base) * 65 + u16::from(tint) * 35) / 100) as u8
+            // Result is always <= 255 since both inputs are u8
+            #[allow(clippy::cast_possible_truncation)]
+            let v = ((u16::from(base) * 65 + u16::from(tint) * 35) / 100) as u8;
+            v
         };
         Color::Rgb {
             r: blend(br, ar).max(40),
@@ -210,13 +216,14 @@ fn load_user_themes() -> Vec<Theme> {
                 Ok(content) => match toml::from_str::<UserTheme>(&content) {
                     Ok(ut) => {
                         let name = ut.name.clone();
-                        match ut.into_theme() {
-                            Some(theme) => themes.push(theme),
-                            None => warn!(
+                        if let Some(theme) = ut.into_theme() {
+                            themes.push(theme);
+                        } else {
+                            warn!(
                                 file = %path.display(),
                                 name,
                                 "user theme has invalid hex color(s), skipping"
-                            ),
+                            );
                         }
                     }
                     Err(e) => warn!(
