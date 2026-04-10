@@ -4,7 +4,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::{cursor, execute, terminal};
 use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal};
@@ -40,6 +41,20 @@ pub enum Action {
     BufferNext,
     /// Switch to the previous buffer in the ring (Ctrl-p).
     BufferPrev,
+    /// Scroll right (horizontal panning).
+    ScrollRight,
+    /// Scroll left (horizontal panning).
+    ScrollLeft,
+    /// Show keybinding help overlay.
+    ShowHelp,
+    /// Toggle follow/tail mode (auto-scroll on file changes).
+    ToggleFollow,
+    /// Set a mark at the current scroll position (user pressed `m`).
+    SetMark(char),
+    /// Jump to a previously set mark (user pressed `'`).
+    JumpToMark(char),
+    /// Export the current document to HTML.
+    ExportHtml,
 }
 
 /// A heading extracted from the markdown source.
@@ -115,6 +130,9 @@ pub fn poll<'a>(
             (KeyCode::Char('n'), KeyModifiers::NONE) => return Ok(Action::NextMatch),
             (KeyCode::Char('N'), KeyModifiers::SHIFT) => return Ok(Action::PrevMatch),
 
+            // Help overlay
+            (KeyCode::Char('?'), _) => return Ok(Action::ShowHelp),
+
             // Table of Contents sidebar
             (KeyCode::Tab, _) => return Ok(Action::ToggleToc),
 
@@ -124,9 +142,29 @@ pub fn poll<'a>(
             // Clipboard copy of code blocks
             (KeyCode::Char('c'), KeyModifiers::NONE) => return Ok(Action::CopyBlock),
 
+            // Export to HTML
+            (KeyCode::Char('e'), KeyModifiers::NONE) => return Ok(Action::ExportHtml),
+
             // Zen mode (full-screen content, no chrome)
             (KeyCode::Char('z'), KeyModifiers::NONE | KeyModifiers::CONTROL) => {
                 return Ok(Action::ToggleZen);
+            }
+
+            // Follow/tail mode (auto-scroll on file changes)
+            (KeyCode::Char('F'), KeyModifiers::SHIFT) => return Ok(Action::ToggleFollow),
+
+            // Bookmark: set mark (m + letter)
+            (KeyCode::Char('m'), KeyModifiers::NONE) => {
+                if let Some(ch) = read_mark_char()? {
+                    return Ok(Action::SetMark(ch));
+                }
+            }
+
+            // Bookmark: jump to mark (' + letter)
+            (KeyCode::Char('\''), _) => {
+                if let Some(ch) = read_mark_char()? {
+                    return Ok(Action::JumpToMark(ch));
+                }
             }
 
             // Buffer switching (Ctrl-n / Ctrl-p)
@@ -180,6 +218,14 @@ pub fn poll<'a>(
                 term.scroll_viewport(ScrollViewport::Bottom);
             }
 
+            // Horizontal scroll
+            (KeyCode::Right, _) | (KeyCode::Char('L'), KeyModifiers::SHIFT) => {
+                return Ok(Action::ScrollRight);
+            }
+            (KeyCode::Left, _) | (KeyCode::Char('H'), KeyModifiers::SHIFT) => {
+                return Ok(Action::ScrollLeft);
+            }
+
             _ => {}
         },
 
@@ -187,10 +233,40 @@ pub fn poll<'a>(
             return Ok(Action::Resize(new_cols, new_rows));
         }
 
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                term.scroll_viewport(ScrollViewport::Delta(-3));
+            }
+            MouseEventKind::ScrollDown => {
+                term.scroll_viewport(ScrollViewport::Delta(3));
+            }
+            _ => {}
+        },
+
         _ => {}
     }
 
     Ok(Action::Continue)
+}
+
+// ── Bookmark mark reader ─────────────────────────────────────────
+
+/// Wait briefly for the next key press and return the character if it's `a-z`.
+/// Returns `None` on timeout or non-letter key (cancels the mark operation).
+fn read_mark_char() -> Result<Option<char>> {
+    // Wait up to 2 seconds for the user to press a letter.
+    if !event::poll(Duration::from_secs(2))? {
+        return Ok(None);
+    }
+    if let Event::Key(key) = event::read()?
+        && let KeyCode::Char(ch) = key.code
+    {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() {
+            return Ok(Some(lower));
+        }
+    }
+    Ok(None)
 }
 
 // ── Search prompt ────────────────────────────────────────────────
@@ -308,6 +384,7 @@ fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
     // so fzf's --height overlay appears centered over the markdown content.
     let mut stdout = std::io::stdout();
     terminal::disable_raw_mode()?;
+    execute!(stdout, DisableMouseCapture)?;
     let (_, term_rows) = terminal::size().unwrap_or((80, 24));
     let center_row = term_rows * 30 / 100;
     execute!(stdout, cursor::MoveTo(0, center_row), cursor::Show)?;
@@ -368,7 +445,8 @@ fn fzf_heading_picker(headings: &[Heading]) -> Result<Option<usize>> {
     execute!(
         stdout,
         cursor::Hide,
-        terminal::Clear(terminal::ClearType::All)
+        terminal::Clear(terminal::ClearType::All),
+        EnableMouseCapture
     )?;
     terminal::enable_raw_mode()?;
 
@@ -415,8 +493,13 @@ pub fn extract_links(markdown: &str) -> Vec<Link> {
 
     // Bare URLs.
     for cap in BARE_URL.captures_iter(markdown) {
-        let url = cap[1].to_string();
-        if seen_urls.insert(url.clone()) {
+        let mut url = cap[1].to_string();
+        // Strip trailing punctuation that is likely sentence-ending, not part of the URL.
+        // E.g. "https://example.com." → "https://example.com"
+        while url.ends_with(['.', ',', ';', ':', '!', '?']) {
+            url.pop();
+        }
+        if !url.is_empty() && seen_urls.insert(url.clone()) {
             links.push(Link {
                 text: url.clone(),
                 url,
@@ -455,6 +538,7 @@ pub fn fzf_link_picker(links: &[Link]) -> Result<bool> {
 
     let mut stdout = std::io::stdout();
     terminal::disable_raw_mode()?;
+    execute!(stdout, DisableMouseCapture)?;
     let (_, term_rows) = terminal::size().unwrap_or((80, 24));
     let center_row = term_rows * 30 / 100;
     execute!(stdout, cursor::MoveTo(0, center_row), cursor::Show)?;
@@ -504,7 +588,8 @@ pub fn fzf_link_picker(links: &[Link]) -> Result<bool> {
     execute!(
         stdout,
         cursor::Hide,
-        terminal::Clear(terminal::ClearType::All)
+        terminal::Clear(terminal::ClearType::All),
+        EnableMouseCapture
     )?;
     terminal::enable_raw_mode()?;
 
@@ -642,6 +727,7 @@ pub fn fzf_code_block_picker(blocks: &[CodeBlock]) -> Result<bool> {
 
     let mut stdout = std::io::stdout();
     terminal::disable_raw_mode()?;
+    execute!(stdout, DisableMouseCapture)?;
     let (_, term_rows) = terminal::size().unwrap_or((80, 24));
     let center_row = term_rows * 30 / 100;
     execute!(stdout, cursor::MoveTo(0, center_row), cursor::Show)?;
@@ -695,7 +781,8 @@ pub fn fzf_code_block_picker(blocks: &[CodeBlock]) -> Result<bool> {
     execute!(
         stdout,
         cursor::Hide,
-        terminal::Clear(terminal::ClearType::All)
+        terminal::Clear(terminal::ClearType::All),
+        EnableMouseCapture
     )?;
     terminal::enable_raw_mode()?;
 
@@ -789,7 +876,30 @@ mod tests {
         let links = extract_links(md);
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].url, "https://example.com");
-        assert_eq!(links[1].url, "http://foo.bar/baz.");
+        // Trailing period should be stripped (it's sentence punctuation, not part of the URL).
+        assert_eq!(links[1].url, "http://foo.bar/baz");
+    }
+
+    #[test]
+    fn extract_bare_urls_trailing_punctuation() {
+        let md = "See https://a.com, and https://b.com; also https://c.com!\n";
+        let links = extract_links(md);
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].url, "https://a.com");
+        assert_eq!(links[1].url, "https://b.com");
+        assert_eq!(links[2].url, "https://c.com");
+    }
+
+    #[test]
+    fn extract_bare_urls_preserves_path_dots() {
+        // Dots that are part of the URL path should NOT be stripped.
+        let md = "Download from https://example.com/v1.2.3/file.tar.gz here.\n";
+        let links = extract_links(md);
+        assert_eq!(links.len(), 1);
+        // The trailing period after "gz" is sentence punctuation, stripped.
+        // But ".gz" itself is preserved because the period after "gz" is
+        // a trailing sentence period, not the one inside the filename.
+        assert_eq!(links[0].url, "https://example.com/v1.2.3/file.tar.gz");
     }
 
     #[test]

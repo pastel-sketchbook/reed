@@ -19,11 +19,15 @@ use clap::Parser;
 /// picker with reed providing the preview. Select a file to open it in the
 /// full interactive viewer. Pipe a file list into stdin to narrow the
 /// candidates (e.g. `find . -name '*.rs' | reed`).
+///
+/// Use `-` as the file argument to read from stdin
+/// (e.g. `curl https://example.com/README.md | reed -`).
 #[derive(Parser)]
 #[command(name = "reed", version, about)]
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
-    /// File to display. If omitted, launches fzf for interactive file picking.
+    /// File to display. Use `-` to read from stdin.
+    /// If omitted, launches fzf for interactive file picking.
     file: Option<PathBuf>,
 
     /// Maximum scrollback lines (default: 100 000).
@@ -56,6 +60,11 @@ struct Cli {
     /// Used internally by the fzf picker for theme switching.
     #[arg(long)]
     prev_theme: bool,
+
+    /// Open the file in an external editor (`$EDITOR`, `nvim`, or `emacs`)
+    /// instead of the built-in viewer.
+    #[arg(long)]
+    editor: bool,
 
     /// Print the ANSI-styled fzf header line (shortcuts + theme name) and exit.
     /// Used internally by fzf transform-header to update the header on theme change.
@@ -94,6 +103,24 @@ fn main() -> Result<()> {
         }
         return fzf_pick_and_view(cli.theme.as_deref(), cli.max_scrollback);
     };
+
+    // `-` as the file argument: read from stdin.
+    if file.as_os_str() == "-" {
+        return view_stdin(
+            cli.print,
+            cli.preview,
+            cli.theme.as_deref(),
+            cli.line,
+            cli.max_scrollback,
+        );
+    }
+
+    // --editor: open directly in an external editor and exit.
+    if cli.editor {
+        let editor =
+            detect_editor().context("no editor found (set $EDITOR or install nvim/emacs)")?;
+        return open_in_editor(&editor, &file);
+    }
 
     // Document files (docx, pptx, xlsx, …): convert to markdown via pandoc
     // and render with the built-in viewer.
@@ -247,6 +274,63 @@ fn cycle_theme(forward: bool) -> Result<()> {
     config::set_active_theme(&mut prefs, theme::ALL_THEMES[next].name);
     config::save_preferences(&prefs).context("failed to save theme preference")?;
     Ok(())
+}
+
+// ── Stdin viewing ───────────────────────────────────────────────
+
+/// Read all of stdin and view the content as markdown or plain text.
+///
+/// For the interactive viewer, `/dev/tty` must be available since stdin
+/// is consumed by the piped input.
+fn view_stdin(
+    print: bool,
+    preview: bool,
+    theme: Option<&str>,
+    line: Option<usize>,
+    max_scrollback: usize,
+) -> Result<()> {
+    let mut content = String::new();
+    std::io::stdin()
+        .read_to_string(&mut content)
+        .context("failed to read from stdin")?;
+
+    if content.is_empty() {
+        bail!("no input received on stdin");
+    }
+
+    if print {
+        viewer::print_to_stdout(&content);
+        return Ok(());
+    }
+
+    if preview {
+        return viewer::preview(&content, theme, line);
+    }
+
+    // Interactive mode: we need to reopen the TTY for crossterm since
+    // stdin is consumed by the pipe. Write the content to a temp file
+    // and view that.
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("reed-stdin.md");
+    std::fs::write(&tmp_path, &content).context("failed to write temp file for stdin content")?;
+
+    let result = viewer::run(
+        &content,
+        max_scrollback,
+        theme,
+        "<stdin>",
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        line,
+        None,
+        Some(tmp_path.as_path()),
+        None,
+    )
+    .map(|_| ());
+
+    // Clean up temp file (best effort).
+    let _ = std::fs::remove_file(&tmp_path);
+
+    result
 }
 
 // ── fzf picker mode ─────────────────────────────────────────────
@@ -519,10 +603,11 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                 .parent()
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
 
-            // Code files: open in an external editor if available, otherwise
-            // fall back to the built-in viewer.  Markdown always uses the
-            // built-in viewer.
-            if code_lang.is_some()
+            // Code / config files: open in an external editor if available,
+            // otherwise fall back to the built-in viewer.  Markdown always
+            // uses the built-in viewer.
+            if !is_markdown
+                && highlight::is_editor_preferred(cur_file)
                 && let Some(editor) = detect_editor()
             {
                 open_in_editor(&editor, cur_file)?;

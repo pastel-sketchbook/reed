@@ -4,7 +4,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    cursor, execute, queue,
+    cursor,
+    event::{DisableMouseCapture, EnableMouseCapture},
+    execute, queue,
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
@@ -241,6 +243,20 @@ enum LoopExit {
     CopyBlock,
     /// Toggle zen mode (hide header/footer).
     ToggleZen,
+    /// Scroll right (horizontal panning).
+    ScrollRight,
+    /// Scroll left (horizontal panning).
+    ScrollLeft,
+    /// Show keybinding help overlay.
+    ShowHelp,
+    /// Toggle follow/tail mode.
+    ToggleFollow,
+    /// Set a bookmark at the current scroll position.
+    SetMark(char),
+    /// Jump to a previously set bookmark.
+    JumpToMark(char),
+    /// Export the current document to HTML.
+    ExportHtml,
 }
 
 /// What caused the viewer to exit — returned to the caller so it can
@@ -255,6 +271,24 @@ pub enum ViewerExit {
     BufferPrev,
 }
 
+/// Map byte offsets to display-width column positions for a plain-text string.
+///
+/// Returns a Vec where `result[byte_offset]` is the display column at that byte.
+/// An extra sentinel entry is appended for end-of-string.
+fn build_byte_to_col_map(plain: &str) -> Vec<usize> {
+    let mut byte_to_col: Vec<usize> = Vec::with_capacity(plain.len() + 1);
+    let mut col = 0usize;
+    for ch in plain.chars() {
+        let byte_len = ch.len_utf8();
+        for _ in 0..byte_len {
+            byte_to_col.push(col);
+        }
+        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    byte_to_col.push(col); // sentinel for end-of-string
+    byte_to_col
+}
+
 /// Persistent search state across inner-loop re-entries.
 struct SearchState {
     /// The current search query (empty = no active search).
@@ -263,6 +297,10 @@ struct SearchState {
     match_rows: Vec<usize>,
     /// Index into `match_rows` for the current match.
     current: usize,
+    /// Column ranges of matches per VT row (1-indexed row → list of (start, end) byte-column ranges).
+    match_cols: std::collections::HashMap<usize, Vec<(usize, usize)>>,
+    /// Compiled regex when the query is valid regex, `None` for literal search.
+    compiled_regex: Option<regex::Regex>,
 }
 
 impl SearchState {
@@ -271,6 +309,8 @@ impl SearchState {
             query: String::new(),
             match_rows: Vec::new(),
             current: 0,
+            match_cols: std::collections::HashMap::new(),
+            compiled_regex: None,
         }
     }
 
@@ -289,21 +329,125 @@ impl SearchState {
         }
     }
 
+    /// Try to compile the query as a regex.
+    ///
+    /// Uses smart-case: case-insensitive by default, case-sensitive when
+    /// the query contains uppercase characters.
+    fn try_compile_regex(query: &str) -> Option<regex::Regex> {
+        // Don't try regex for very short queries or plain alphanumeric strings
+        // that are unlikely to be intentional regex patterns.
+        let has_meta = query.contains(|c: char| {
+            matches!(
+                c,
+                '.' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '^' | '$' | '\\'
+            )
+        });
+        if !has_meta {
+            return None;
+        }
+        let pattern = if Self::is_case_sensitive(query) {
+            query.to_string()
+        } else {
+            format!("(?i){query}")
+        };
+        regex::Regex::new(&pattern).ok()
+    }
+
+    /// Find all match column ranges in a plain-text line for the query.
+    /// Returns a list of `(start_col, end_col)` where columns are counted
+    /// by Unicode display width (not byte offset).
+    fn find_match_columns(plain: &str, query: &str) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        if query.is_empty() {
+            return ranges;
+        }
+        let case_sensitive = Self::is_case_sensitive(query);
+        let (haystack_lower, needle_lower);
+        let (haystack, needle) = if case_sensitive {
+            (plain, query)
+        } else {
+            haystack_lower = plain.to_lowercase();
+            needle_lower = query.to_lowercase();
+            (haystack_lower.as_str(), needle_lower.as_str())
+        };
+
+        // Map byte offsets in `haystack` to display-width column positions.
+        let byte_to_col = build_byte_to_col_map(plain);
+        let col_end = byte_to_col.last().copied().unwrap_or(0);
+
+        let needle_bytes = needle.len();
+        let mut start = 0;
+        while let Some(pos) = haystack[start..].find(needle) {
+            let abs_pos = start + pos;
+            let end_pos = abs_pos + needle_bytes;
+            let start_col = byte_to_col.get(abs_pos).copied().unwrap_or(col_end);
+            let end_col = byte_to_col.get(end_pos).copied().unwrap_or(col_end);
+            ranges.push((start_col, end_col));
+            start = abs_pos + 1;
+        }
+
+        ranges
+    }
+
+    /// Find match column ranges using a compiled regex.
+    fn find_regex_match_columns(plain: &str, re: &regex::Regex) -> Vec<(usize, usize)> {
+        let byte_to_col = build_byte_to_col_map(plain);
+        let col_end = byte_to_col.last().copied().unwrap_or(0);
+
+        re.find_iter(plain)
+            .map(|m| {
+                let start_col = byte_to_col.get(m.start()).copied().unwrap_or(col_end);
+                let end_col = byte_to_col.get(m.end()).copied().unwrap_or(col_end);
+                (start_col, end_col)
+            })
+            .collect()
+    }
+
     /// Rebuild match positions by scanning ANSI text for the query.
     /// Uses smart-case: case-insensitive by default, case-sensitive when
     /// the query contains uppercase characters.
+    /// Supports regex when the query contains metacharacters.
     fn find_matches(&mut self, ansi_text: &str) {
         self.match_rows.clear();
+        self.match_cols.clear();
         self.current = 0;
+        self.compiled_regex = None;
         if self.query.is_empty() {
             return;
         }
+
+        // Try to compile as regex if the query has metacharacters.
+        self.compiled_regex = Self::try_compile_regex(&self.query);
+
         for (i, line) in ansi_text.split("\r\n").enumerate() {
             let plain = strip_ansi_codes(line);
-            if Self::smart_contains(&plain, &self.query) {
-                self.match_rows.push(i + 1); // 1-indexed
+            let row = i + 1; // 1-indexed
+
+            let cols = if let Some(ref re) = self.compiled_regex {
+                // Regex mode.
+                let ranges = Self::find_regex_match_columns(&plain, re);
+                if ranges.is_empty() {
+                    continue;
+                }
+                ranges
+            } else {
+                // Literal mode.
+                if !Self::smart_contains(&plain, &self.query) {
+                    continue;
+                }
+                Self::find_match_columns(&plain, &self.query)
+            };
+
+            self.match_rows.push(row);
+            if !cols.is_empty() {
+                self.match_cols.insert(row, cols);
             }
         }
+    }
+
+    /// Get the column match ranges for a given VT row (1-indexed).
+    fn match_ranges_for_row(&self, vt_row: usize) -> Option<&Vec<(usize, usize)>> {
+        self.match_cols.get(&vt_row)
     }
 
     /// Jump to the next match. Returns the 1-indexed VT row, or `None`.
@@ -386,6 +530,7 @@ pub fn run(
         execute!(
             stdout,
             terminal::EnterAlternateScreen,
+            EnableMouseCapture,
             cursor::Hide,
             terminal::Clear(ClearType::All)
         )?;
@@ -434,6 +579,15 @@ pub fn run(
 
         // Zen mode: hide header and footer for full-screen content.
         let mut zen_mode = false;
+
+        // Horizontal scroll offset (columns to skip from the left).
+        let mut h_offset: usize = 0;
+
+        // Follow/tail mode: auto-scroll to bottom on file changes.
+        let mut follow_mode = false;
+
+        // Bookmarks: letter → VT row offset.
+        let mut marks: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
 
         // File watching: last known mtime.
         let mut last_mtime: Option<std::time::SystemTime> = file_path
@@ -567,6 +721,8 @@ pub fn run(
                 &mut last_mtime,
                 gfx,
                 buffer_info,
+                h_offset,
+                follow_mode,
             )? {
                 LoopExit::Quit => break,
                 LoopExit::BufferNext => {
@@ -648,6 +804,19 @@ pub fn run(
                     let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
                     goto_line = Some(scroll_pos + 1);
                 }
+                LoopExit::ScrollRight => {
+                    // Scroll right by 4 columns.
+                    h_offset = h_offset.saturating_add(4);
+                }
+                LoopExit::ScrollLeft => {
+                    h_offset = h_offset.saturating_sub(4);
+                }
+                LoopExit::ShowHelp => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    draw_help_overlay(&mut stdout, cols, rows, theme)?;
+                    goto_line = Some(scroll_pos + 1);
+                }
                 LoopExit::OpenLink => {
                     #[allow(clippy::cast_possible_truncation)]
                     let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
@@ -667,10 +836,17 @@ pub fn run(
                     if let Some(path) = file_path
                         && let Ok(new_content) = std::fs::read_to_string(path)
                     {
-                        // Preserve scroll position.
-                        #[allow(clippy::cast_possible_truncation)]
-                        let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
-                        goto_line = Some(scroll_pos + 1);
+                        if follow_mode {
+                            // Follow mode: don't set goto_line so the viewport
+                            // stays at the bottom after vt_write.
+                            goto_line = None;
+                        } else {
+                            // Preserve scroll position.
+                            #[allow(clippy::cast_possible_truncation)]
+                            let scroll_pos =
+                                term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                            goto_line = Some(scroll_pos + 1);
+                        }
 
                         markdown_owned = new_content;
                         headings = input::extract_headings(&markdown_owned);
@@ -687,6 +863,51 @@ pub fn run(
                         // outer loop re-rendering + find_matches).
                     }
                 }
+                LoopExit::ToggleFollow => {
+                    follow_mode = !follow_mode;
+                    if follow_mode {
+                        // Entering follow mode: jump to end of file.
+                        goto_line = None; // vt_write positions at bottom
+                    } else {
+                        // Exiting follow mode: preserve current position.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                        goto_line = Some(scroll_pos + 1);
+                    }
+                }
+                LoopExit::SetMark(ch) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    marks.insert(ch, scroll_pos);
+                    // Stay at current position — no need to break the inner loop.
+                    goto_line = Some(scroll_pos + 1);
+                }
+                LoopExit::JumpToMark(ch) => {
+                    if let Some(&row) = marks.get(&ch) {
+                        goto_line = Some(row + 1); // 0-indexed → 1-indexed
+                    } else {
+                        // Mark not set — preserve current position.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                        goto_line = Some(scroll_pos + 1);
+                    }
+                }
+                LoopExit::ExportHtml => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+
+                    let theme = &theme::ALL_THEMES[theme_index];
+                    let output_path = export_html_path(file_path);
+                    match export_to_html(&markdown_owned, theme, &output_path) {
+                        Ok(()) => {
+                            debug!(path = %output_path.display(), "exported HTML");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "HTML export failed");
+                        }
+                    }
+                    goto_line = Some(scroll_pos + 1);
+                }
             }
         }
 
@@ -694,7 +915,12 @@ pub fn run(
     })();
 
     // Always restore terminal, even on error.
-    let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = execute!(
+        stdout,
+        DisableMouseCapture,
+        terminal::LeaveAlternateScreen,
+        cursor::Show
+    );
     let _ = terminal::disable_raw_mode();
 
     result
@@ -874,6 +1100,8 @@ fn run_inner_loop<'a>(
     last_mtime: &mut Option<std::time::SystemTime>,
     gfx: GraphicsProtocol,
     buffer_info: Option<(usize, usize)>,
+    h_offset: usize,
+    follow_mode: bool,
 ) -> Result<LoopExit> {
     let mut frame_count: u32 = 0;
     loop {
@@ -938,6 +1166,11 @@ fn run_inner_loop<'a>(
                         .match_rows
                         .get(search.current)
                         .is_some_and(|&r| r == vt_row);
+                let match_ranges = if is_match_row {
+                    search.match_ranges_for_row(vt_row)
+                } else {
+                    None
+                };
 
                 // Content starts at terminal row 1 (after header), or 0 in zen mode.
                 queue!(stdout, cursor::MoveTo(0, screen_row + content_y))?;
@@ -956,23 +1189,19 @@ fn run_inner_loop<'a>(
                 }
 
                 // Left padding.
-                let row_bg = if is_current_match {
-                    theme.search_current_bg()
-                } else if is_match_row {
-                    theme.search_match_bg()
-                } else {
-                    theme.bg
-                };
                 queue!(
                     stdout,
                     SetAttribute(Attribute::Reset),
                     SetForegroundColor(theme.fg),
-                    SetBackgroundColor(row_bg),
+                    SetBackgroundColor(theme.bg),
                     Print(" ".repeat(usize::from(SIDE_PAD))),
                 )?;
 
                 let mut col_pos: u16 = 0;
+                let mut vt_col: u16 = 0; // virtual column in the VT content
                 let mut cell_iter = cell_it.update(row)?;
+                #[allow(clippy::cast_possible_truncation)]
+                let h_off = h_offset.min(u16::MAX as usize) as u16;
 
                 while let Some(cell) = cell_iter.next() {
                     let graphemes: Vec<char> = cell.graphemes()?;
@@ -984,14 +1213,38 @@ fn run_inner_loop<'a>(
                     let fg = fg_rgb.map_or(theme.fg, rgb_to_color);
                     let bg = bg_rgb.map_or(theme.bg, rgb_to_color);
 
-                    // Override background for search-match rows.
-                    let bg = if is_current_match {
-                        theme.search_current_bg()
-                    } else if is_match_row {
-                        theme.search_match_bg()
+                    // Character-level search highlighting: check if this cell
+                    // falls within any match column range.
+                    let cell_col = usize::from(vt_col);
+                    let in_match = match_ranges.is_some_and(|ranges| {
+                        ranges.iter().any(|&(s, e)| cell_col >= s && cell_col < e)
+                    });
+                    let bg = if in_match {
+                        if is_current_match {
+                            theme.search_current_bg()
+                        } else {
+                            theme.search_match_bg()
+                        }
                     } else {
                         bg
                     };
+
+                    let cell_width: u16 = if graphemes.is_empty() {
+                        1
+                    } else {
+                        let text: String = graphemes.iter().collect();
+                        #[allow(clippy::cast_possible_truncation)]
+                        let w = UnicodeWidthStr::width(text.as_str()) as u16;
+                        w
+                    };
+
+                    // Skip cells that are entirely before the horizontal offset.
+                    if vt_col + cell_width <= h_off {
+                        vt_col += cell_width;
+                        continue;
+                    }
+
+                    vt_col += cell_width;
 
                     let (foreground, background) = if style.inverse { (bg, fg) } else { (fg, bg) };
 
@@ -1033,7 +1286,7 @@ fn run_inner_loop<'a>(
                         stdout,
                         SetAttribute(Attribute::Reset),
                         SetForegroundColor(theme.fg),
-                        SetBackgroundColor(row_bg),
+                        SetBackgroundColor(theme.bg),
                         Print(" ".repeat(usize::from(cols) - filled)),
                     )?;
                 }
@@ -1087,7 +1340,14 @@ fn run_inner_loop<'a>(
 
         // ── Draw footer (last row) ──────────────────────────────
         if !zen_mode {
-            draw_footer(stdout, content_rows + content_y, cols, theme, search)?;
+            draw_footer(
+                stdout,
+                content_rows + content_y,
+                cols,
+                theme,
+                search,
+                follow_mode,
+            )?;
         }
 
         // End synchronized update — terminal renders the complete frame now.
@@ -1095,9 +1355,11 @@ fn run_inner_loop<'a>(
         stdout.flush()?;
 
         // ── Handle input ─────────────────────────────────────────
-        // Check for file changes every ~60 frames (~1 second at 16ms poll).
+        // Check for file changes periodically.
+        // In follow mode, check every ~6 frames (~100ms); otherwise ~60 frames (~1s).
         frame_count += 1;
-        if frame_count.is_multiple_of(60)
+        let check_interval = if follow_mode { 6 } else { 60 };
+        if frame_count.is_multiple_of(check_interval)
             && let Some(path) = file_path
             && let Ok(meta) = std::fs::metadata(path)
             && let Ok(mtime) = meta.modified()
@@ -1131,6 +1393,13 @@ fn run_inner_loop<'a>(
             input::Action::BufferNext => return Ok(LoopExit::BufferNext),
             input::Action::BufferPrev => return Ok(LoopExit::BufferPrev),
             input::Action::CopyBlock => return Ok(LoopExit::CopyBlock),
+            input::Action::ScrollRight => return Ok(LoopExit::ScrollRight),
+            input::Action::ScrollLeft => return Ok(LoopExit::ScrollLeft),
+            input::Action::ShowHelp => return Ok(LoopExit::ShowHelp),
+            input::Action::ToggleFollow => return Ok(LoopExit::ToggleFollow),
+            input::Action::SetMark(ch) => return Ok(LoopExit::SetMark(ch)),
+            input::Action::JumpToMark(ch) => return Ok(LoopExit::JumpToMark(ch)),
+            input::Action::ExportHtml => return Ok(LoopExit::ExportHtml),
         }
     }
 }
@@ -1441,6 +1710,7 @@ fn draw_footer(
     cols: u16,
     theme: &Theme,
     search: &SearchState,
+    follow_mode: bool,
 ) -> Result<()> {
     queue!(
         stdout,
@@ -1497,8 +1767,11 @@ fn draw_footer(
         )
     };
 
-    let right = format!("{search_info}{}{pad}", theme.name);
-    let right_len = UnicodeWidthStr::width(right.as_str());
+    let follow_indicator = if follow_mode { "[FOLLOW] " } else { "" };
+    let theme_with_pad = format!("{}{pad}", theme.name);
+    let right_len = UnicodeWidthStr::width(search_info.as_str())
+        + UnicodeWidthStr::width(follow_indicator)
+        + UnicodeWidthStr::width(theme_with_pad.as_str());
 
     // Fill middle with background.
     let middle = usize::from(cols).saturating_sub(left_len + right_len);
@@ -1508,7 +1781,7 @@ fn draw_footer(
         Print(" ".repeat(middle)),
     )?;
 
-    // Search info (right-aligned, before theme name).
+    // Search info (right-aligned, before follow indicator / theme name).
     if !search_info.is_empty() {
         queue!(
             stdout,
@@ -1517,11 +1790,22 @@ fn draw_footer(
         )?;
     }
 
+    // Follow indicator.
+    if follow_mode {
+        queue!(
+            stdout,
+            SetForegroundColor(theme.accent),
+            SetAttribute(Attribute::Bold),
+            Print(follow_indicator),
+            SetAttribute(Attribute::NormalIntensity),
+        )?;
+    }
+
     // Theme name (right-aligned).
     queue!(
         stdout,
         SetForegroundColor(theme.heading),
-        Print(&right),
+        Print(&theme_with_pad),
         ResetColor,
     )?;
 
@@ -1554,12 +1838,146 @@ fn build_key_hints() -> Vec<(HintStyle, &'static str)> {
         (HintStyle::Key, " z "),
         (HintStyle::Desc, "Zen "),
         (HintStyle::Sep, "\u{2502}"),
+        (HintStyle::Key, " ? "),
+        (HintStyle::Desc, "Help "),
+        (HintStyle::Sep, "\u{2502}"),
         (HintStyle::Key, " q "),
         (HintStyle::Desc, "Quit"),
     ]
 }
 
 // ── Size warning ──────────────────────────────────────────────────
+
+// ── Help overlay ──────────────────────────────────────────────────
+
+/// Help entries: (key, description).
+const HELP_ENTRIES: &[(&str, &str)] = &[
+    ("j/k, \u{2191}/\u{2193}", "Scroll up / down"),
+    ("Space, PgDn", "Page down"),
+    ("PgUp", "Page up"),
+    ("Ctrl-d / Ctrl-u", "Half-page down / up"),
+    ("g / G", "Top / bottom"),
+    ("\u{2190}/\u{2192}, H/L", "Scroll left / right"),
+    ("Mouse wheel", "Scroll up / down"),
+    ("", ""),
+    ("/", "Search"),
+    ("n / N", "Next / previous match"),
+    ("Tab", "Toggle Table of Contents"),
+    ("s", "Fuzzy heading jump"),
+    ("l", "Link picker (open URL)"),
+    ("c", "Code block picker (copy)"),
+    ("m + a-z", "Set bookmark"),
+    ("' + a-z", "Jump to bookmark"),
+    ("e", "Export to HTML"),
+    ("", ""),
+    ("t / T", "Next / previous theme"),
+    ("z", "Toggle zen mode"),
+    ("F", "Toggle follow/tail mode"),
+    ("Ctrl-n / Ctrl-p", "Next / previous buffer"),
+    ("?", "This help screen"),
+    ("q / Esc", "Quit"),
+];
+
+/// Draw a centered help overlay showing all keybindings.
+/// Waits for any key press to dismiss.
+fn draw_help_overlay(stdout: &mut io::Stdout, cols: u16, rows: u16, theme: &Theme) -> Result<()> {
+    use crossterm::event::{self, Event};
+
+    let box_width: u16 = 44;
+    #[allow(clippy::cast_possible_truncation)]
+    let box_height: u16 = (HELP_ENTRIES.len().min(u16::MAX as usize) as u16) + 4;
+
+    let x = cols.saturating_sub(box_width) / 2;
+    let y = rows.saturating_sub(box_height) / 2;
+
+    // Draw box background.
+    for row in 0..box_height {
+        queue!(
+            stdout,
+            cursor::MoveTo(x, y + row),
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(theme.header_bg),
+            SetForegroundColor(theme.header_fg),
+            Print(" ".repeat(usize::from(box_width))),
+        )?;
+    }
+
+    // Title.
+    let title = " Keybindings ";
+    #[allow(clippy::cast_possible_truncation)]
+    let title_x = x + (box_width.saturating_sub(title.len().min(u16::MAX as usize) as u16)) / 2;
+    queue!(
+        stdout,
+        cursor::MoveTo(title_x, y),
+        SetForegroundColor(theme.title),
+        SetAttribute(Attribute::Bold),
+        Print(title),
+        SetAttribute(Attribute::NormalIntensity),
+    )?;
+
+    // Separator.
+    let sep_line = "\u{2500}".repeat(usize::from(box_width).saturating_sub(4));
+    queue!(
+        stdout,
+        cursor::MoveTo(x + 2, y + 1),
+        SetForegroundColor(theme.border),
+        SetBackgroundColor(theme.header_bg),
+        Print(&sep_line),
+    )?;
+
+    // Entries.
+    for (i, &(key, desc)) in HELP_ENTRIES.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let entry_y = y + 2 + (i.min(u16::MAX as usize) as u16);
+        if key.is_empty() {
+            // Blank separator line.
+            continue;
+        }
+        queue!(
+            stdout,
+            cursor::MoveTo(x + 2, entry_y),
+            SetBackgroundColor(theme.header_bg),
+            SetForegroundColor(theme.accent),
+            SetAttribute(Attribute::Bold),
+        )?;
+        // Right-pad the key column to 20 chars.
+        let key_display = format!("{key:<20}");
+        queue!(
+            stdout,
+            Print(&key_display),
+            SetAttribute(Attribute::NormalIntensity),
+            SetForegroundColor(theme.header_fg),
+            Print(desc),
+        )?;
+    }
+
+    // Footer hint.
+    let hint = "Press any key to close";
+    #[allow(clippy::cast_possible_truncation)]
+    let hint_x = x + (box_width.saturating_sub(hint.len().min(u16::MAX as usize) as u16)) / 2;
+    queue!(
+        stdout,
+        cursor::MoveTo(hint_x, y + box_height - 1),
+        SetForegroundColor(theme.muted),
+        SetBackgroundColor(theme.header_bg),
+        Print(hint),
+        ResetColor,
+    )?;
+
+    stdout.flush()?;
+
+    // Wait for any key.
+    loop {
+        if let Ok(Event::Key(_) | Event::Mouse(_)) = event::read() {
+            break;
+        }
+    }
+
+    // Clear and let the outer loop redraw.
+    execute!(stdout, terminal::Clear(ClearType::All))?;
+
+    Ok(())
+}
 
 fn render_size_warning(stdout: &mut io::Stdout, cols: u16, rows: u16, theme: &Theme) -> Result<()> {
     execute!(stdout, terminal::Clear(ClearType::All))?;
@@ -1877,6 +2295,165 @@ fn is_horizontal_rule(trimmed: &str) -> bool {
         return false;
     }
     chars_only.chars().all(|c| c == first)
+}
+
+// ── HTML export ──────────────────────────────────────────────────
+
+/// Determine the output path for an HTML export.
+fn export_html_path(file_path: Option<&Path>) -> std::path::PathBuf {
+    if let Some(p) = file_path {
+        p.with_extension("html")
+    } else {
+        std::path::PathBuf::from("reed-export.html")
+    }
+}
+
+/// Export markdown content to a self-contained HTML file with embedded CSS.
+fn export_to_html(markdown: &str, theme: &Theme, output_path: &Path) -> Result<()> {
+    use pulldown_cmark::{Options, Parser, html};
+
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES;
+    let parser = Parser::new_ext(markdown, options);
+
+    let mut html_body = String::new();
+    html::push_html(&mut html_body, parser);
+
+    let css = export_css(theme);
+    let title = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("reed export");
+
+    let document = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+{css}
+</style>
+</head>
+<body>
+<article>
+{html_body}
+</article>
+</body>
+</html>
+"#
+    );
+
+    std::fs::write(output_path, &document)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(())
+}
+
+/// Generate CSS matching the current reed theme.
+fn export_css(theme: &Theme) -> String {
+    let bg = css_color(theme.bg);
+    let fg = css_color(theme.fg);
+    let accent = css_color(theme.accent);
+    let heading = css_color(theme.heading);
+    let muted = css_color(theme.muted);
+    let pre_background = css_color(theme.code_bg);
+    let pre_foreground = css_color(theme.code_fg);
+
+    format!(
+        r#"
+:root {{
+  color-scheme: light dark;
+}}
+body {{
+  background: {bg};
+  color: {fg};
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  max-width: 50em;
+  margin: 2em auto;
+  padding: 0 1em;
+}}
+article {{
+  overflow-wrap: break-word;
+}}
+h1, h2, h3, h4, h5, h6 {{
+  color: {heading};
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  line-height: 1.3;
+}}
+h1 {{ font-size: 2em; border-bottom: 2px solid {accent}; padding-bottom: 0.3em; }}
+h2 {{ font-size: 1.5em; border-bottom: 1px solid {muted}; padding-bottom: 0.2em; }}
+h3 {{ font-size: 1.25em; }}
+a {{ color: {accent}; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+code {{
+  background: {pre_background};
+  color: {pre_foreground};
+  padding: 0.15em 0.3em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}}
+pre {{
+  background: {pre_background};
+  padding: 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+}}
+pre code {{
+  padding: 0;
+  background: transparent;
+  font-size: 0.85em;
+}}
+blockquote {{
+  border-left: 4px solid {accent};
+  margin-left: 0;
+  padding-left: 1em;
+  color: {muted};
+}}
+table {{
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+}}
+th, td {{
+  border: 1px solid {muted};
+  padding: 0.5em 0.75em;
+  text-align: left;
+}}
+th {{
+  background: {pre_background};
+}}
+hr {{
+  border: none;
+  border-top: 1px solid {muted};
+  margin: 2em 0;
+}}
+img {{
+  max-width: 100%;
+  height: auto;
+}}
+ul, ol {{
+  padding-left: 1.5em;
+}}
+li {{
+  margin-bottom: 0.25em;
+}}
+"#
+    )
+}
+
+/// Convert a crossterm `Color` to a CSS color string.
+fn css_color(color: Color) -> String {
+    match color {
+        Color::Rgb { r, g, b } => format!("#{r:02x}{g:02x}{b:02x}"),
+        _ => "inherit".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -2212,6 +2789,73 @@ End.\n";
     }
 
     #[test]
+    fn search_match_columns_basic() {
+        let cols = SearchState::find_match_columns("Hello world", "world");
+        assert_eq!(cols, vec![(6, 11)]);
+    }
+
+    #[test]
+    fn search_match_columns_multiple() {
+        let cols = SearchState::find_match_columns("abcabc", "abc");
+        assert_eq!(cols, vec![(0, 3), (3, 6)]);
+    }
+
+    #[test]
+    fn search_match_columns_case_insensitive() {
+        // Lowercase query → case-insensitive (find_match_columns respects smart-case)
+        let cols = SearchState::find_match_columns("Hello HELLO", "hello");
+        assert_eq!(cols, vec![(0, 5), (6, 11)]);
+    }
+
+    #[test]
+    fn search_match_columns_stores_in_state() {
+        let mut search = SearchState::new();
+        search.query = "fox".to_string();
+        search.find_matches("the fox ran\r\nno match\r\nfox again");
+        assert_eq!(search.match_rows, vec![1, 3]);
+        assert_eq!(search.match_ranges_for_row(1), Some(&vec![(4, 7)]));
+        assert_eq!(search.match_ranges_for_row(3), Some(&vec![(0, 3)]));
+        assert_eq!(search.match_ranges_for_row(2), None);
+    }
+
+    #[test]
+    fn search_regex_pattern() {
+        let mut search = SearchState::new();
+        search.query = r"f\w+x".to_string(); // regex: f + word chars + x
+        search.find_matches("the fox ran\r\nno match\r\nfloox again");
+        assert_eq!(search.match_rows, vec![1, 3]);
+        assert!(search.compiled_regex.is_some());
+    }
+
+    #[test]
+    fn search_regex_dot_star() {
+        let mut search = SearchState::new();
+        search.query = "he.*ld".to_string(); // regex: he...ld
+        search.find_matches("hello world\r\nnope\r\nheld");
+        assert_eq!(search.match_rows, vec![1, 3]);
+    }
+
+    #[test]
+    fn search_regex_invalid_falls_back() {
+        // Plain text without metacharacters → literal search, no regex.
+        let mut search = SearchState::new();
+        search.query = "hello".to_string();
+        search.find_matches("hello world\r\nnope");
+        assert_eq!(search.match_rows, vec![1]);
+        assert!(search.compiled_regex.is_none());
+    }
+
+    #[test]
+    fn search_regex_columns() {
+        let mut search = SearchState::new();
+        search.query = r"\d+".to_string(); // regex: one or more digits
+        search.find_matches("abc 123 def\r\nno digits");
+        assert_eq!(search.match_rows, vec![1]);
+        let ranges = search.match_ranges_for_row(1).unwrap();
+        assert_eq!(ranges, &[(4, 7)]); // "123" at columns 4-7
+    }
+
+    #[test]
     fn find_current_heading_basic() {
         let headings = vec![
             input::Heading {
@@ -2245,5 +2889,47 @@ End.\n";
 
         // After last heading
         assert_eq!(find_current_heading(&headings, 50), Some(2));
+    }
+
+    #[test]
+    fn export_html_path_with_file() {
+        let p = export_html_path(Some(std::path::Path::new("notes.md")));
+        assert_eq!(p, std::path::PathBuf::from("notes.html"));
+    }
+
+    #[test]
+    fn export_html_path_without_file() {
+        let p = export_html_path(None);
+        assert_eq!(p, std::path::PathBuf::from("reed-export.html"));
+    }
+
+    #[test]
+    fn export_to_html_produces_valid_document() {
+        let theme = &theme::ALL_THEMES[0];
+        let tmp = std::env::temp_dir().join("reed-test-export.html");
+        let md = "# Hello\n\nSome **bold** and *italic* text.\n\n```rust\nfn main() {}\n```\n";
+        export_to_html(md, theme, &tmp).unwrap();
+        let html = std::fs::read_to_string(&tmp).unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("<h1>Hello</h1>"));
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<em>italic</em>"));
+        assert!(html.contains("<code"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn css_color_rgb() {
+        let c = css_color(Color::Rgb {
+            r: 255,
+            g: 0,
+            b: 128,
+        });
+        assert_eq!(c, "#ff0080");
+    }
+
+    #[test]
+    fn css_color_reset() {
+        assert_eq!(css_color(Color::Reset), "inherit");
     }
 }

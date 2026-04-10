@@ -99,6 +99,47 @@ pub fn is_markdown_path(path: &std::path::Path) -> bool {
         .is_some_and(|ext| MARKDOWN_EXTS.iter().any(|m| m.eq_ignore_ascii_case(ext)))
 }
 
+/// Extensions for config/data files that should always open in an external
+/// editor from the fzf picker, even when syntect doesn't recognize them.
+const EDITOR_PREFERRED_EXTS: &[&str] = &[
+    "toml",
+    "yaml",
+    "yml",
+    "json",
+    "jsonc",
+    "json5",
+    "xml",
+    "svg",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "properties",
+    "csv",
+    "tsv",
+];
+
+/// Return `true` if `path` has an extension that should be opened in an
+/// external editor from the fzf picker.
+///
+/// This catches config/data formats (TOML, YAML, JSON, XML, SVG, etc.) that
+/// syntect may not recognize, plus any extension that syntect *does* recognize
+/// (i.e. `lang_for_path` returns `Some`).
+pub fn is_editor_preferred(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    // Explicit list first (handles toml, svg, etc. that syntect misses).
+    if EDITOR_PREFERRED_EXTS
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(ext))
+    {
+        return true;
+    }
+    // Fall back to syntect recognition (all code files).
+    lang_for_path(path).is_some()
+}
+
 /// Derive a language tag from a file path's extension.
 ///
 /// Returns `Some("rs")` for `foo.rs`, `None` for files without an extension
@@ -491,6 +532,51 @@ def bar():
         assert_eq!(lang_for_path(Path::new("main.rs")), Some("rs".to_string()));
         assert_eq!(lang_for_path(Path::new("app.py")), Some("py".to_string()));
         assert_eq!(lang_for_path(Path::new("index.js")), Some("js".to_string()));
+    }
+
+    #[test]
+    fn lang_for_path_config_and_data_extensions() {
+        use std::path::Path;
+        // Config / data file formats — check which syntect recognizes.
+        let toml = lang_for_path(Path::new("config.toml"));
+        let yaml = lang_for_path(Path::new("data.yaml"));
+        let yml = lang_for_path(Path::new("data.yml"));
+        let json = lang_for_path(Path::new("data.json"));
+        let xml = lang_for_path(Path::new("page.xml"));
+        let svg = lang_for_path(Path::new("icon.svg"));
+        // At least yaml, json, xml should be recognized by syntect defaults.
+        assert!(yaml.is_some(), "yaml not recognized: {yaml:?}");
+        assert!(yml.is_some(), "yml not recognized: {yml:?}");
+        assert!(json.is_some(), "json not recognized: {json:?}");
+        assert!(xml.is_some(), "xml not recognized: {xml:?}");
+        // toml and svg may not be in syntect's default set.
+        // Our editor-preferred list handles them regardless.
+        let _ = (toml, svg);
+    }
+
+    #[test]
+    fn is_editor_preferred_catches_all_targets() {
+        use std::path::Path;
+        // Extensions that syntect may not recognize but should still open in editor.
+        assert!(is_editor_preferred(Path::new("config.toml")));
+        assert!(is_editor_preferred(Path::new("icon.svg")));
+        assert!(is_editor_preferred(Path::new("settings.ini")));
+        assert!(is_editor_preferred(Path::new("data.csv")));
+        assert!(is_editor_preferred(Path::new("app.env")));
+        // Extensions syntect does recognize — should also be editor-preferred.
+        assert!(is_editor_preferred(Path::new("data.yaml")));
+        assert!(is_editor_preferred(Path::new("data.json")));
+        assert!(is_editor_preferred(Path::new("page.xml")));
+        assert!(is_editor_preferred(Path::new("main.rs")));
+        assert!(is_editor_preferred(Path::new("app.py")));
+        // Markdown should NOT be editor-preferred (uses built-in viewer).
+        // is_editor_preferred doesn't check markdown; that's the caller's job.
+        // But markdown has no syntect code_lang, so it would return false
+        // unless .md is in a syntax set. Let's just verify the caller logic
+        // is correct by checking that .md is not in EDITOR_PREFERRED_EXTS.
+        assert!(!EDITOR_PREFERRED_EXTS.iter().any(|e| *e == "md"));
+        // No extension → false.
+        assert!(!is_editor_preferred(Path::new("Makefile")));
     }
 
     #[test]
