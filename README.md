@@ -22,6 +22,8 @@ entirely and use syntect for direct syntax highlighting.
 - **Editor integration** -- code files open in your `$EDITOR`, `nvim`, or
   `emacs` (first available); Markdown always uses the built-in viewer
 - **Binary file viewing** -- binary files open in `hexyl` when installed
+- **Document viewing** -- Office files (docx, pptx, xlsx, odt, rtf, epub)
+  converted to markdown via `pandoc` and rendered in the built-in viewer
 - **Vendor filter** -- toggle vendor/generated directories (`node_modules`,
   `target`, `.git`, etc.) in the fzf picker with `Ctrl-v` (requires `fd`)
 - **Scrollback navigation** -- PgUp/PgDn, Home/End, arrow keys, `j`/`k`

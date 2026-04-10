@@ -94,6 +94,37 @@ fn main() -> Result<()> {
         return fzf_pick_and_view(cli.theme.as_deref(), cli.max_scrollback);
     };
 
+    // Document files (docx, pptx, xlsx, …): convert to markdown via pandoc
+    // and render with the built-in viewer.
+    if is_document_path(&file) && has_command("pandoc") {
+        let markdown = pandoc_to_markdown(&file)?;
+        let filename = file.display().to_string();
+        let base_dir = file
+            .canonicalize()
+            .unwrap_or_else(|_| file.clone())
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+        if cli.print {
+            viewer::print_to_stdout(&markdown);
+            return Ok(());
+        } else if cli.preview {
+            return viewer::preview(&markdown, cli.theme.as_deref(), cli.line);
+        }
+        return viewer::run(
+            &markdown,
+            cli.max_scrollback,
+            cli.theme.as_deref(),
+            &filename,
+            &base_dir,
+            cli.line,
+            None, // Rendered as markdown.
+            Some(file.as_path()),
+            None,
+        )
+        .map(|_| ());
+    }
+
     // Binary files: images are displayed natively when the terminal
     // supports a graphics protocol; other binaries open in hexyl.
     if is_binary(&file) {
@@ -409,6 +440,49 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         loop {
             let cur_file = &buffer_ring[buffer_index];
 
+            // Document files: convert to markdown via pandoc and display
+            // in the built-in viewer.
+            if is_document_path(cur_file) && has_command("pandoc") {
+                let markdown = pandoc_to_markdown(cur_file)?;
+                let filename = cur_file.display().to_string();
+                let base_dir = cur_file
+                    .canonicalize()
+                    .unwrap_or_else(|_| cur_file.clone())
+                    .parent()
+                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+                let buf_info = if buffer_ring.len() > 1 {
+                    Some((buffer_index + 1, buffer_ring.len()))
+                } else {
+                    None
+                };
+                let exit = viewer::run(
+                    &markdown,
+                    max_scrollback,
+                    theme,
+                    &filename,
+                    &base_dir,
+                    None,
+                    None,
+                    Some(cur_file.as_path()),
+                    buf_info,
+                )?;
+                match exit {
+                    viewer::ViewerExit::Quit => break,
+                    viewer::ViewerExit::BufferNext => {
+                        if buffer_ring.len() > 1 {
+                            buffer_index = (buffer_index + 1) % buffer_ring.len();
+                        }
+                    }
+                    viewer::ViewerExit::BufferPrev => {
+                        if buffer_ring.len() > 1 {
+                            buffer_index =
+                                (buffer_index + buffer_ring.len() - 1) % buffer_ring.len();
+                        }
+                    }
+                }
+                continue;
+            }
+
             // Binary files: images are displayed natively when the
             // terminal supports a graphics protocol; other binaries
             // open in hexyl.
@@ -559,6 +633,35 @@ fn is_binary(path: &Path) -> bool {
     let mut buf = [0u8; 8192];
     let n = file.take(8192).read(&mut buf).unwrap_or(0);
     buf[..n].contains(&0)
+}
+
+/// Document extensions that `pandoc` can convert to markdown.
+const DOCUMENT_EXTS: &[&str] = &["docx", "pptx", "xlsx", "odt", "rtf", "epub"];
+
+/// Returns `true` when `path` has a document extension convertible by pandoc.
+fn is_document_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| DOCUMENT_EXTS.iter().any(|d| d.eq_ignore_ascii_case(ext)))
+}
+
+/// Convert a document file to markdown via `pandoc`.
+///
+/// Returns the markdown string, or an error if pandoc is not installed or
+/// conversion fails.
+fn pandoc_to_markdown(path: &Path) -> Result<String> {
+    let output = Command::new("pandoc")
+        .arg(path)
+        .arg("-t")
+        .arg("markdown")
+        .arg("--wrap=none")
+        .output()
+        .context("failed to run pandoc (is it installed?)")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("pandoc failed: {stderr}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Open a binary file in `hexyl`.  Blocks until hexyl exits.
