@@ -534,7 +534,8 @@ pub fn run(
                 use libghostty_vt::terminal::ScrollViewport;
                 term.scroll_viewport(ScrollViewport::Top);
                 #[allow(clippy::cast_possible_wrap)]
-                let delta = line.saturating_sub(1) as isize;
+                // Clamp to isize::MAX to prevent sign-flip on extremely large line numbers.
+                let delta = line.saturating_sub(1).min(isize::MAX as usize) as isize;
                 if delta > 0 {
                     term.scroll_viewport(ScrollViewport::Delta(delta));
                 }
@@ -891,7 +892,7 @@ fn run_inner_loop<'a>(
         let viewport_top = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
 
         // Row offset where content begins (after header, or 0 in zen mode).
-        let content_y: u16 = if zen_mode { 0 } else { 1 };
+        let content_y: u16 = u16::from(!zen_mode);
 
         // ── Compute TOC layout ───────────────────────────────────
         let toc_width: u16 = if toc_visible && !headings.is_empty() {
@@ -1267,10 +1268,11 @@ fn draw_toc_cell(
         let indent = (h.level as usize).saturating_sub(1).min(3) * 2;
         let is_current = current_heading_idx == Some(heading_idx);
 
-        // Truncate heading text to fit.
+        // Truncate heading text to fit (char-safe boundary to avoid UTF-8 panic).
         let max_text = inner_w.saturating_sub(indent);
-        let display_text: String = if h.text.len() > max_text {
-            format!("{}…", &h.text[..max_text.saturating_sub(1)])
+        let display_text: String = if h.text.chars().count() > max_text {
+            let truncated: String = h.text.chars().take(max_text.saturating_sub(1)).collect();
+            format!("{truncated}…")
         } else {
             h.text.clone()
         };
@@ -1383,8 +1385,19 @@ fn draw_header(
         + UnicodeWidthStr::width(version)
         + UnicodeWidthStr::width(separator);
     let remaining = usize::from(cols).saturating_sub(used + usize::from(SIDE_PAD));
-    let display_name = if filename.len() > remaining {
-        &filename[filename.len() - remaining..]
+    let display_name = if UnicodeWidthStr::width(filename) > remaining {
+        // Truncate from the left so the most-specific part (filename) is visible.
+        // Walk characters from the end to find a char-safe boundary.
+        let mut char_count = 0;
+        let start = filename
+            .char_indices()
+            .rev()
+            .find_map(|(i, _)| {
+                char_count += 1;
+                (char_count >= remaining).then_some(i)
+            })
+            .unwrap_or(0);
+        &filename[start..]
     } else {
         filename
     };

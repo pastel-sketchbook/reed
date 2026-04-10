@@ -400,11 +400,11 @@ mod tests {
         );
         assert!(dark.is_some(), "dark theme render should succeed");
         assert!(light.is_some(), "light theme render should succeed");
-        // The two renders should produce different PNGs (different themes).
+        // The two renders should produce different images (different themes).
         assert_ne!(
             dark.as_ref().unwrap().len(),
             light.as_ref().unwrap().len(),
-            "dark and light PNGs should differ (different themes)"
+            "dark and light renders should differ (different themes)"
         );
     }
 }

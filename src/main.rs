@@ -63,6 +63,7 @@ struct Cli {
     print_header: bool,
 }
 
+#[expect(clippy::too_many_lines)]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -694,12 +695,12 @@ fn display_image(path: &Path, gfx: images::GraphicsProtocol) -> Result<()> {
     let max_rows = term_rows.saturating_sub(1);
     let max_cols = term_cols;
 
-    let (png_data, _img_cols, _img_rows) =
+    let (png_data, img_cols, img_rows) =
         images::load_image(path, max_cols, cell_w, cell_h).context("failed to load image")?;
 
     // Clamp display rows so the image doesn't overflow the screen.
-    let display_rows = _img_rows.min(max_rows);
-    let display_cols = _img_cols.min(max_cols);
+    let display_rows = img_rows.min(max_rows);
+    let display_cols = img_cols.min(max_cols);
 
     let mut stdout = std::io::stdout();
 
@@ -728,7 +729,7 @@ fn display_image(path: &Path, gfx: images::GraphicsProtocol) -> Result<()> {
         || path.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    let hint = format!(" {} — press q to exit", filename);
+    let hint = format!(" {filename} — press q to exit");
     execute!(stdout, cursor::MoveTo(0, term_rows - 1))?;
     write!(
         stdout,

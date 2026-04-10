@@ -63,7 +63,7 @@ pub fn extract_headings(markdown: &str) -> Vec<Heading> {
             // Count the heading level.
             let hashes = 1 + rest.len() - rest.trim_start_matches('#').len();
             #[allow(clippy::cast_possible_truncation)]
-            let level = (hashes as u8).min(6);
+            let level = hashes.min(6) as u8;
             let text_part = rest.trim_start_matches('#');
 
             // Must have a space after the #'s (or be empty for bare `#`).
@@ -125,8 +125,9 @@ pub fn poll<'a>(
             (KeyCode::Char('c'), KeyModifiers::NONE) => return Ok(Action::CopyBlock),
 
             // Zen mode (full-screen content, no chrome)
-            (KeyCode::Char('z'), KeyModifiers::NONE)
-            | (KeyCode::Char('z'), KeyModifiers::CONTROL) => return Ok(Action::ToggleZen),
+            (KeyCode::Char('z'), KeyModifiers::NONE | KeyModifiers::CONTROL) => {
+                return Ok(Action::ToggleZen);
+            }
 
             // Buffer switching (Ctrl-n / Ctrl-p)
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Ok(Action::BufferNext),
@@ -235,7 +236,7 @@ pub fn search_prompt(
             ResetColor,
             // query length is bounded by terminal width which fits in u16
             #[allow(clippy::cast_possible_truncation)]
-            cursor::MoveTo(1 + query.len() as u16, row),
+            cursor::MoveTo(1 + query.len().min(u16::MAX as usize - 1) as u16, row),
             cursor::Show
         )?;
         stdout.flush()?;
@@ -565,7 +566,7 @@ pub fn extract_code_blocks(markdown: &str) -> Vec<CodeBlock> {
                     content.pop();
                 }
                 blocks.push(CodeBlock {
-                    lang: lang.clone(),
+                    lang: std::mem::take(&mut lang),
                     content: std::mem::take(&mut content),
                 });
                 in_fence = false;
@@ -617,9 +618,9 @@ pub fn fzf_code_block_picker(blocks: &[CodeBlock]) -> Result<bool> {
     let mut input = String::new();
     for (i, block) in blocks.iter().enumerate() {
         let lang_label = if block.lang.is_empty() {
-            "plain".to_string()
+            "plain"
         } else {
-            block.lang.clone()
+            &block.lang
         };
         // First non-empty line as preview, truncated.
         let preview = block
