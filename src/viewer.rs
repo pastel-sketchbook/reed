@@ -77,7 +77,7 @@ pub fn fzf_header_line(theme: &Theme) -> String {
 /// Returns `GraphicsProtocol::None` for terminals known not to support
 /// any graphics, `Kitty` for Kitty-capable terminals, and `Sixel` for
 /// terminals that support Sixel but not Kitty.
-fn detect_graphics_protocol() -> GraphicsProtocol {
+pub fn detect_graphics_protocol() -> GraphicsProtocol {
     // Kitty protocol: Ghostty, Kitty, WezTerm, Konsole.
     if config::is_ghostty() {
         return GraphicsProtocol::Kitty;

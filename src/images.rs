@@ -117,6 +117,18 @@ fn libc_stdout() -> i32 {
     1 // STDOUT_FILENO
 }
 
+// ── Image file detection ──────────────────────────────────────────
+
+/// Image extensions supported by the `image` crate features we compile with.
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+/// Returns `true` when `path` has a recognised image extension.
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| IMAGE_EXTS.iter().any(|i| i.eq_ignore_ascii_case(ext)))
+}
+
 // ── Markdown scanning ─────────────────────────────────────────────
 
 /// Extract all `![alt](path)` references from markdown source.

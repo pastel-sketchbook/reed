@@ -94,8 +94,56 @@ fn main() -> Result<()> {
         return fzf_pick_and_view(cli.theme.as_deref(), cli.max_scrollback);
     };
 
+    // Binary files: images are displayed natively when the terminal
+    // supports a graphics protocol; other binaries open in hexyl.
+    if is_binary(&file) {
+        let gfx = viewer::detect_graphics_protocol();
+
+        // Image files → display with Kitty / Sixel when possible.
+        if images::is_image_path(&file) && gfx != images::GraphicsProtocol::None {
+            return if cli.print || cli.preview {
+                print_image(&file, gfx)
+            } else {
+                display_image(&file, gfx)
+            };
+        }
+
+        // Non-image binary → hexyl.
+        if !has_command("hexyl") {
+            bail!(
+                "{} is a binary file (install hexyl for hex viewing)",
+                file.display()
+            );
+        }
+        if cli.print || cli.preview {
+            let status = Command::new("hexyl")
+                .arg(&file)
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .context("failed to launch hexyl")?;
+            if !status.success() {
+                tracing::warn!("hexyl exited with status {status}");
+            }
+            return Ok(());
+        }
+        return open_in_hexyl(&file);
+    }
+
     let raw_content = std::fs::read_to_string(&file)
         .with_context(|| format!("failed to read {}", file.display()))?;
+
+    // When running as an fzf preview, clear any Kitty images left over
+    // from a previously previewed image file.
+    if cli.preview {
+        let gfx = viewer::detect_graphics_protocol();
+        if gfx == images::GraphicsProtocol::Kitty {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            write!(stdout, "\x1b_Ga=d,d=A,q=2;\x1b\\")?;
+            stdout.flush()?;
+        }
+    }
 
     let is_markdown = highlight::is_markdown_path(&file);
     let code_lang = if is_markdown {
@@ -287,12 +335,12 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         let mut fzf = Command::new("fzf");
         fzf.arg("--height").arg("100%");
         fzf.arg("--preview").arg(&preview_cmd);
-        fzf.arg("--preview-window").arg("right:60%");
+        fzf.arg("--preview-window").arg("right:64%");
         // Static header showing shortcuts + current theme name.
         fzf.arg("--header").arg(&initial_header);
         // ctrl-/ cycles through preview layouts.
         fzf.arg("--bind")
-            .arg("ctrl-/:change-preview-window(right:60%|up:70%|down:40%|hidden)");
+            .arg("ctrl-/:change-preview-window(right:64%|up:70%|down:40%|hidden)");
         // ctrl-n / ctrl-b cycle themes: update prefs, refresh preview, update header.
         fzf.arg("--bind").arg(format!(
             "ctrl-n:execute-silent({next_theme_cmd})+refresh-preview+transform-header({header_cmd})"
@@ -360,6 +408,25 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         // through the buffer ring without returning to fzf.
         loop {
             let cur_file = &buffer_ring[buffer_index];
+
+            // Binary files: images are displayed natively when the
+            // terminal supports a graphics protocol; other binaries
+            // open in hexyl.
+            if is_binary(cur_file) {
+                let gfx = viewer::detect_graphics_protocol();
+                if images::is_image_path(cur_file) && gfx != images::GraphicsProtocol::None {
+                    display_image(cur_file, gfx)?;
+                } else if has_command("hexyl") {
+                    open_in_hexyl(cur_file)?;
+                } else {
+                    tracing::warn!(
+                        "skipping binary file {} (install hexyl for hex viewing)",
+                        cur_file.display()
+                    );
+                }
+                break; // Return to fzf picker.
+            }
+
             let raw_content = std::fs::read_to_string(cur_file)
                 .with_context(|| format!("failed to read {}", cur_file.display()))?;
 
@@ -377,11 +444,14 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                 .parent()
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
 
-            // Code files: open in nvim if available, otherwise fall back to
-            // the built-in viewer.  Markdown always uses the built-in viewer.
-            if code_lang.is_some() && has_nvim() {
-                open_in_nvim(cur_file)?;
-                break; // Return to fzf picker after nvim exits.
+            // Code files: open in an external editor if available, otherwise
+            // fall back to the built-in viewer.  Markdown always uses the
+            // built-in viewer.
+            if code_lang.is_some()
+                && let Some(editor) = detect_editor()
+            {
+                open_in_editor(&editor, cur_file)?;
+                break; // Return to fzf picker after editor exits.
             }
 
             let buf_info = if buffer_ring.len() > 1 {
@@ -418,9 +488,9 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     }
 }
 
-/// Check whether `nvim` is available on `$PATH`.
-fn has_nvim() -> bool {
-    Command::new("nvim")
+/// Check whether a command is available on `$PATH`.
+fn has_command(cmd: &str) -> bool {
+    Command::new(cmd)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -429,18 +499,211 @@ fn has_nvim() -> bool {
         .unwrap_or(false)
 }
 
-/// Open a file in `nvim`.  Blocks until the editor exits.
-fn open_in_nvim(path: &Path) -> Result<()> {
-    let status = Command::new("nvim")
+/// Detect the preferred code editor.
+///
+/// Resolution order:
+/// 1. `$EDITOR` environment variable (if set and available on `$PATH`).
+/// 2. `nvim` if available.
+/// 3. `emacs` if available.
+///
+/// Returns `None` when no suitable editor is found.
+fn detect_editor() -> Option<String> {
+    if let Ok(editor) = std::env::var("EDITOR") {
+        // $EDITOR may contain arguments (e.g. "code --wait"), take the
+        // first token as the command name.
+        let cmd = editor.split_whitespace().next().unwrap_or(&editor);
+        if has_command(cmd) {
+            return Some(editor);
+        }
+        tracing::debug!("$EDITOR={editor:?} is not available on $PATH, trying fallbacks");
+    }
+    for candidate in &["nvim", "emacs"] {
+        if has_command(candidate) {
+            return Some((*candidate).to_string());
+        }
+    }
+    None
+}
+
+/// Open a file in the given editor command.  Blocks until the editor exits.
+///
+/// `editor` may contain arguments (e.g. `"code --wait"`); the file path is
+/// appended as the last argument.
+fn open_in_editor(editor: &str, path: &Path) -> Result<()> {
+    let mut parts = editor.split_whitespace();
+    let cmd = parts.next().context("empty editor command")?;
+    let mut command = Command::new(cmd);
+    for arg in parts {
+        command.arg(arg);
+    }
+    command.arg(path);
+    command
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = command
+        .status()
+        .with_context(|| format!("failed to launch {cmd}"))?;
+    if !status.success() {
+        tracing::warn!("{cmd} exited with status {status}");
+    }
+    Ok(())
+}
+
+/// Heuristic binary detection: read up to 8 KiB and look for NUL bytes.
+fn is_binary(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 8192];
+    let n = file.take(8192).read(&mut buf).unwrap_or(0);
+    buf[..n].contains(&0)
+}
+
+/// Open a binary file in `hexyl`.  Blocks until hexyl exits.
+fn open_in_hexyl(path: &Path) -> Result<()> {
+    let status = Command::new("hexyl")
         .arg(path)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .context("failed to launch nvim")?;
+        .context("failed to launch hexyl")?;
     if !status.success() {
-        tracing::warn!("nvim exited with status {status}");
+        tracing::warn!("hexyl exited with status {status}");
     }
+    Ok(())
+}
+
+/// Display an image file directly in the terminal using the Kitty or Sixel
+/// graphics protocol.  Enters the alternate screen, shows the image, waits
+/// for `q`/`Esc`/`Enter`, then restores the terminal.
+fn display_image(path: &Path, gfx: images::GraphicsProtocol) -> Result<()> {
+    use crossterm::event::{self, Event, KeyCode};
+    use crossterm::{cursor, execute, terminal};
+    use std::io::Write;
+
+    let (term_cols, term_rows) = terminal::size().context("failed to query terminal size")?;
+    let (cell_w, cell_h) = images::cell_size_px();
+
+    // Reserve one row for the status line at the bottom.
+    let max_rows = term_rows.saturating_sub(1);
+    let max_cols = term_cols;
+
+    let (png_data, _img_cols, _img_rows) =
+        images::load_image(path, max_cols, cell_w, cell_h).context("failed to load image")?;
+
+    // Clamp display rows so the image doesn't overflow the screen.
+    let display_rows = _img_rows.min(max_rows);
+    let display_cols = _img_cols.min(max_cols);
+
+    let mut stdout = std::io::stdout();
+
+    terminal::enable_raw_mode()?;
+    execute!(
+        stdout,
+        terminal::EnterAlternateScreen,
+        terminal::Clear(terminal::ClearType::All),
+        cursor::Hide,
+        cursor::MoveTo(0, 0)
+    )?;
+
+    // Emit the image.
+    match gfx {
+        images::GraphicsProtocol::Kitty => {
+            images::emit_kitty_image(&mut stdout, &png_data, display_cols, display_rows)?;
+        }
+        images::GraphicsProtocol::Sixel => {
+            images::emit_sixel_image(&mut stdout, &png_data, display_cols, display_rows)?;
+        }
+        images::GraphicsProtocol::None => unreachable!(),
+    }
+
+    // Status line at the very bottom.
+    let filename = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let hint = format!(" {} — press q to exit", filename);
+    execute!(stdout, cursor::MoveTo(0, term_rows - 1))?;
+    write!(
+        stdout,
+        "\x1b[7m{hint:<width$}\x1b[0m",
+        width = usize::from(term_cols)
+    )?;
+    stdout.flush()?;
+
+    // Wait for quit key.
+    loop {
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => break,
+                _ => {}
+            }
+        }
+    }
+
+    // Clean up: delete Kitty images, restore terminal.
+    if gfx == images::GraphicsProtocol::Kitty {
+        write!(stdout, "\x1b_Ga=d,q=2;\x1b\\")?;
+    }
+    execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen)?;
+    terminal::disable_raw_mode()?;
+
+    Ok(())
+}
+
+/// Emit an image to stdout (for `--print` / `--preview` mode) without
+/// entering the alternate screen or waiting for input.
+///
+/// When running inside the fzf preview pane, respects `FZF_PREVIEW_COLUMNS`
+/// and `FZF_PREVIEW_LINES` so the image is sized to the pane rather than
+/// the full terminal.  A Kitty "delete all" is emitted first so that
+/// switching to a non-image file in fzf clears the previous image.
+fn print_image(path: &Path, gfx: images::GraphicsProtocol) -> Result<()> {
+    use std::io::Write;
+
+    // Prefer fzf preview dimensions, fall back to terminal size.
+    let preview_cols: u16 = std::env::var("FZF_PREVIEW_COLUMNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| crossterm::terminal::size().ok().map(|(c, _)| c))
+        .unwrap_or(80);
+    let preview_rows: u16 = std::env::var("FZF_PREVIEW_LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| crossterm::terminal::size().ok().map(|(_, r)| r))
+        .unwrap_or(24);
+
+    let (cell_w, cell_h) = images::cell_size_px();
+
+    let (png_data, img_cols, img_rows) =
+        images::load_image(path, preview_cols, cell_w, cell_h).context("failed to load image")?;
+
+    // Clamp to available preview rows so the image doesn't overflow.
+    let display_rows = img_rows.min(preview_rows);
+    let display_cols = img_cols.min(preview_cols);
+
+    let mut stdout = std::io::stdout();
+
+    // Delete any previously placed Kitty images so switching files in
+    // fzf clears the old image.
+    if gfx == images::GraphicsProtocol::Kitty {
+        write!(stdout, "\x1b_Ga=d,d=A,q=2;\x1b\\")?;
+    }
+
+    match gfx {
+        images::GraphicsProtocol::Kitty => {
+            images::emit_kitty_image(&mut stdout, &png_data, display_cols, display_rows)?;
+        }
+        images::GraphicsProtocol::Sixel => {
+            images::emit_sixel_image(&mut stdout, &png_data, display_cols, display_rows)?;
+        }
+        images::GraphicsProtocol::None => unreachable!(),
+    }
+    writeln!(stdout)?;
+    stdout.flush()?;
     Ok(())
 }
 
