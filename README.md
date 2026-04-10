@@ -70,6 +70,7 @@ reed --theme "Gruvbox" <file>  # override saved theme
 | `t` | Next theme |
 | `T` | Previous theme |
 | `s` | Fuzzy heading search (fzf) |
+| `z` | Toggle zen mode (fullscreen, no chrome) |
 
 ### fzf picker keybindings
 

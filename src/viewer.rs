@@ -239,6 +239,8 @@ enum LoopExit {
     BufferPrev,
     /// Open code block picker for clipboard copy.
     CopyBlock,
+    /// Toggle zen mode (hide header/footer).
+    ToggleZen,
 }
 
 /// What caused the viewer to exit — returned to the caller so it can
@@ -430,6 +432,9 @@ pub fn run(
         // Table of Contents sidebar visibility.
         let mut toc_visible = false;
 
+        // Zen mode: hide header and footer for full-screen content.
+        let mut zen_mode = false;
+
         // File watching: last known mtime.
         let mut last_mtime: Option<std::time::SystemTime> = file_path
             .and_then(|p| std::fs::metadata(p).ok())
@@ -454,8 +459,9 @@ pub fn run(
                 }
             }
 
-            // Layout: 1 row header + content + 1 row footer.
-            let content_rows = rows.saturating_sub(2).max(1);
+            // Layout: 1 row header + content + 1 row footer (unless zen mode).
+            let chrome_rows = if zen_mode { 0 } else { 2 };
+            let content_rows = rows.saturating_sub(chrome_rows).max(1);
             let inner_cols = cols.saturating_sub(2 * SIDE_PAD).max(1);
 
             // --- Render mermaid diagrams to PNG (theme-aware) ---
@@ -555,6 +561,7 @@ pub fn run(
                 &mapped_headings,
                 &search,
                 toc_visible,
+                zen_mode,
                 file_path,
                 &mut last_mtime,
                 gfx,
@@ -630,6 +637,12 @@ pub fn run(
                 LoopExit::ToggleToc => {
                     toc_visible = !toc_visible;
                     // Preserve scroll position across toggle.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    goto_line = Some(scroll_pos + 1);
+                }
+                LoopExit::ToggleZen => {
+                    zen_mode = !zen_mode;
                     #[allow(clippy::cast_possible_truncation)]
                     let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
                     goto_line = Some(scroll_pos + 1);
@@ -855,6 +868,7 @@ fn run_inner_loop<'a>(
     headings: &[input::Heading],
     search: &SearchState,
     toc_visible: bool,
+    zen_mode: bool,
     file_path: Option<&Path>,
     last_mtime: &mut Option<std::time::SystemTime>,
     gfx: GraphicsProtocol,
@@ -868,11 +882,16 @@ fn run_inner_loop<'a>(
         queue!(stdout, terminal::BeginSynchronizedUpdate)?;
 
         // ── Draw header (row 0) ──────────────────────────────────
-        draw_header(stdout, cols, theme, filename, buffer_info)?;
+        if !zen_mode {
+            draw_header(stdout, cols, theme, filename, buffer_info)?;
+        }
 
         // ── Determine viewport scroll offset ─────────────────────
         #[allow(clippy::cast_possible_truncation)]
         let viewport_top = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+
+        // Row offset where content begins (after header, or 0 in zen mode).
+        let content_y: u16 = if zen_mode { 0 } else { 1 };
 
         // ── Compute TOC layout ───────────────────────────────────
         let toc_width: u16 = if toc_visible && !headings.is_empty() {
@@ -919,8 +938,8 @@ fn run_inner_loop<'a>(
                         .get(search.current)
                         .is_some_and(|&r| r == vt_row);
 
-                // Content starts at terminal row 1 (after header).
-                queue!(stdout, cursor::MoveTo(0, screen_row + 1))?;
+                // Content starts at terminal row 1 (after header), or 0 in zen mode.
+                queue!(stdout, cursor::MoveTo(0, screen_row + content_y))?;
 
                 // ── TOC sidebar column (if visible) ──────────────
                 if toc_width > 0 {
@@ -1024,7 +1043,7 @@ fn run_inner_loop<'a>(
 
             // Fill any remaining content rows with theme background.
             while screen_row < content_rows {
-                queue!(stdout, cursor::MoveTo(0, screen_row + 1))?;
+                queue!(stdout, cursor::MoveTo(0, screen_row + content_y))?;
                 // Draw TOC column on empty rows too.
                 if toc_width > 0 {
                     draw_toc_cell(
@@ -1056,17 +1075,19 @@ fn run_inner_loop<'a>(
                     // Delete all previously placed Kitty images to prevent ghost
                     // artifacts when scrolling.  q=2 suppresses terminal responses.
                     write!(stdout, "\x1b_Ga=d,q=2;\x1b\\")?;
-                    emit_visible_images(stdout, term, placements, content_rows, gfx)?;
+                    emit_visible_images(stdout, term, placements, content_rows, content_y, gfx)?;
                 }
                 GraphicsProtocol::Sixel => {
-                    emit_visible_images(stdout, term, placements, content_rows, gfx)?;
+                    emit_visible_images(stdout, term, placements, content_rows, content_y, gfx)?;
                 }
                 GraphicsProtocol::None => {} // unreachable if placements is non-empty
             }
         }
 
         // ── Draw footer (last row) ──────────────────────────────
-        draw_footer(stdout, content_rows + 1, cols, theme, search)?;
+        if !zen_mode {
+            draw_footer(stdout, content_rows + content_y, cols, theme, search)?;
+        }
 
         // End synchronized update — terminal renders the complete frame now.
         queue!(stdout, terminal::EndSynchronizedUpdate)?;
@@ -1104,6 +1125,7 @@ fn run_inner_loop<'a>(
             input::Action::NextMatch => return Ok(LoopExit::NextMatch),
             input::Action::PrevMatch => return Ok(LoopExit::PrevMatch),
             input::Action::ToggleToc => return Ok(LoopExit::ToggleToc),
+            input::Action::ToggleZen => return Ok(LoopExit::ToggleZen),
             input::Action::OpenLink => return Ok(LoopExit::OpenLink),
             input::Action::BufferNext => return Ok(LoopExit::BufferNext),
             input::Action::BufferPrev => return Ok(LoopExit::BufferPrev),
@@ -1125,6 +1147,7 @@ fn emit_visible_images(
     term: &Terminal<'_, '_>,
     placements: &[ImagePlacement],
     content_rows: u16,
+    content_y: u16,
     gfx: GraphicsProtocol,
 ) -> Result<()> {
     // Determine the scroll offset: which document row is at the top of the viewport.
@@ -1154,7 +1177,7 @@ fn emit_visible_images(
         // Position cursor at the image location (left padding + content area).
         // NOTE: no flush here — everything stays buffered until the single
         // frame-end flush so delete + re-emit is atomic (no blink).
-        queue!(stdout, cursor::MoveTo(SIDE_PAD, screen_row + 1))?;
+        queue!(stdout, cursor::MoveTo(SIDE_PAD, screen_row + content_y))?;
 
         // Emit the image via the detected graphics protocol.
         match gfx {
@@ -1514,6 +1537,9 @@ fn build_key_hints() -> Vec<(HintStyle, &'static str)> {
         (HintStyle::Sep, "\u{2502}"),
         (HintStyle::Key, " t/T "),
         (HintStyle::Desc, "Theme "),
+        (HintStyle::Sep, "\u{2502}"),
+        (HintStyle::Key, " z "),
+        (HintStyle::Desc, "Zen "),
         (HintStyle::Sep, "\u{2502}"),
         (HintStyle::Key, " q "),
         (HintStyle::Desc, "Quit"),

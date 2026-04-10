@@ -285,7 +285,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         let initial_header = viewer::fzf_header_line(initial_theme);
 
         let mut fzf = Command::new("fzf");
-        fzf.arg("--height").arg("90%");
+        fzf.arg("--height").arg("100%");
         fzf.arg("--preview").arg(&preview_cmd);
         fzf.arg("--preview-window").arg("right:60%");
         // Static header showing shortcuts + current theme name.

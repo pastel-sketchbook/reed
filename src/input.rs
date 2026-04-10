@@ -34,6 +34,8 @@ pub enum Action {
     OpenLink,
     /// Open code block picker for clipboard copy (user pressed `c`).
     CopyBlock,
+    /// Toggle zen mode (hide header/footer for full-screen content).
+    ToggleZen,
     /// Switch to the next buffer in the ring (Ctrl-n).
     BufferNext,
     /// Switch to the previous buffer in the ring (Ctrl-p).
@@ -121,6 +123,10 @@ pub fn poll<'a>(
 
             // Clipboard copy of code blocks
             (KeyCode::Char('c'), KeyModifiers::NONE) => return Ok(Action::CopyBlock),
+
+            // Zen mode (full-screen content, no chrome)
+            (KeyCode::Char('z'), KeyModifiers::NONE)
+            | (KeyCode::Char('z'), KeyModifiers::CONTROL) => return Ok(Action::ToggleZen),
 
             // Buffer switching (Ctrl-n / Ctrl-p)
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Ok(Action::BufferNext),

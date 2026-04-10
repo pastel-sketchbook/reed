@@ -65,6 +65,7 @@ tasks:
     deps: [build]
     cmds:
       - cp target/release/$PGM_NAME ~/bin
+      - codesign -f -s - ~/bin/$PGM_NAME
 
   clean:
     desc: Remove build artifacts
