@@ -157,33 +157,18 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
         .or_else(|| terminal::size().ok().map(|(c, _)| usize::from(c)))
         .unwrap_or(80);
 
-    // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
-    let max_lines = std::env::var("FZF_PREVIEW_LINES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-
     let skin = theme::build_skin(theme);
     let highlighted = highlight::highlight_code_blocks(markdown, theme.bg);
     let joined = join_paragraphs(&highlighted);
     let rendered = skin.text(&joined, Some(width)).to_string();
 
-    // Split into lines, optionally skip to start_line, optionally limit count.
+    // Output all lines — fzf handles scrolling internally.
     let lines: Vec<&str> = rendered.lines().collect();
     let start_offset = start_line.unwrap_or(1).saturating_sub(1);
-    let iter = lines.iter().skip(start_offset);
 
     let mut stdout = io::stdout().lock();
-    match max_lines {
-        Some(limit) => {
-            for line in iter.take(limit) {
-                writeln!(stdout, "{line}")?;
-            }
-        }
-        None => {
-            for line in iter {
-                writeln!(stdout, "{line}")?;
-            }
-        }
+    for line in lines.iter().skip(start_offset) {
+        writeln!(stdout, "{line}")?;
     }
 
     Ok(())
@@ -204,11 +189,6 @@ pub fn preview_code(
     let name = config::resolve_theme_name(theme_name, &prefs);
     let theme = &theme::ALL_THEMES[theme::theme_index_by_name(name)];
 
-    // Determine max output lines: FZF_PREVIEW_LINES > unlimited.
-    let max_lines = std::env::var("FZF_PREVIEW_LINES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-
     // Attempt syntax highlighting; fall back to raw source.
     let highlighted = lang
         .and_then(|l| highlight::highlight_code(source, l, theme.bg))
@@ -217,26 +197,13 @@ pub fn preview_code(
     // Apply theme background: set bg color, print text, clear to EOL.
     let bg = ansi_bg(theme.bg);
 
+    // Output all lines — fzf handles scrolling internally.
     let lines: Vec<&str> = highlighted.lines().collect();
     let start_offset = start_line.unwrap_or(1).saturating_sub(1);
-    let iter = lines.iter().skip(start_offset);
 
     let mut stdout = io::stdout().lock();
-    let write_line = |stdout: &mut io::StdoutLock<'_>, line: &str| -> Result<()> {
+    for line in lines.iter().skip(start_offset) {
         writeln!(stdout, "{bg}{line}{ANSI_CLEAR_EOL}{ANSI_RESET}")?;
-        Ok(())
-    };
-    match max_lines {
-        Some(limit) => {
-            for line in iter.take(limit) {
-                write_line(&mut stdout, line)?;
-            }
-        }
-        None => {
-            for line in iter {
-                write_line(&mut stdout, line)?;
-            }
-        }
     }
 
     Ok(())
