@@ -61,7 +61,7 @@ struct Cli {
     #[arg(long)]
     prev_theme: bool,
 
-    /// Open the file in an external editor (`$EDITOR`, `nvim`, or `emacs`)
+    /// Open the file in an external editor (`emacs`, `nvim`, or `$EDITOR`)
     /// instead of the built-in viewer.
     #[arg(long)]
     editor: bool,
@@ -118,7 +118,7 @@ fn main() -> Result<()> {
     // --editor: open directly in an external editor and exit.
     if cli.editor {
         let editor =
-            detect_editor().context("no editor found (set $EDITOR or install nvim/emacs)")?;
+            detect_editor().context("no editor found (install emacs/nvim or set $EDITOR)")?;
         return open_in_editor(&editor, &file);
     }
 
@@ -662,12 +662,17 @@ fn has_command(cmd: &str) -> bool {
 /// Detect the preferred code editor.
 ///
 /// Resolution order:
-/// 1. `$EDITOR` environment variable (if set and available on `$PATH`).
+/// 1. `emacs` if available.
 /// 2. `nvim` if available.
-/// 3. `emacs` if available.
+/// 3. `$EDITOR` environment variable (if set and available on `$PATH`).
 ///
 /// Returns `None` when no suitable editor is found.
 fn detect_editor() -> Option<String> {
+    for candidate in &["emacs", "nvim"] {
+        if has_command(candidate) {
+            return Some((*candidate).to_string());
+        }
+    }
     if let Ok(editor) = std::env::var("EDITOR") {
         // $EDITOR may contain arguments (e.g. "code --wait"), take the
         // first token as the command name.
@@ -676,11 +681,6 @@ fn detect_editor() -> Option<String> {
             return Some(editor);
         }
         tracing::debug!("$EDITOR={editor:?} is not available on $PATH, trying fallbacks");
-    }
-    for candidate in &["nvim", "emacs"] {
-        if has_command(candidate) {
-            return Some((*candidate).to_string());
-        }
     }
     None
 }
