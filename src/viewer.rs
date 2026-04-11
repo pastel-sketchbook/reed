@@ -147,7 +147,14 @@ pub fn print_to_stdout(markdown: &str) {
 ///
 /// Respects `FZF_PREVIEW_COLUMNS` / `FZF_PREVIEW_LINES` for width/height.
 /// When `start_line` is set, output begins at that 1-indexed line.
-pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usize>) -> Result<()> {
+///
+/// `base_dir` is used to resolve relative image paths in `![alt](path)` references.
+pub fn preview(
+    markdown: &str,
+    theme_name: Option<&str>,
+    start_line: Option<usize>,
+    base_dir: &Path,
+) -> Result<()> {
     // Resolve theme: CLI flag > saved preference (Ghostty-aware) > default.
     let prefs = config::load_preferences();
     let name = config::resolve_theme_name(theme_name, &prefs);
@@ -160,9 +167,38 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
         .or_else(|| terminal::size().ok().map(|(c, _)| usize::from(c)))
         .unwrap_or(80);
 
-    let skin = theme::build_skin(theme);
+    // Detect graphics protocol and extract images if supported.
+    let gfx = detect_graphics_protocol();
+    let has_graphics = gfx != GraphicsProtocol::None;
+
+    let image_refs = if has_graphics {
+        images::extract_images(markdown, base_dir)
+    } else {
+        Vec::new()
+    };
+
+    let (cell_w, cell_h) = images::cell_size_px();
+    #[allow(clippy::cast_possible_truncation)]
+    let inner_cols = width.min(u16::MAX as usize) as u16;
+
+    // Build processed markdown: replace image lines with placeholders.
     let highlighted = highlight::highlight_code_blocks(markdown, theme.bg);
-    let joined = join_paragraphs(&highlighted);
+    let (processed, placements) = if image_refs.is_empty() {
+        (highlighted, Vec::new())
+    } else {
+        build_processed_markdown(
+            &highlighted,
+            &image_refs,
+            &[], // no mermaid blocks in preview
+            &[], // no rendered mermaids in preview
+            inner_cols,
+            cell_w,
+            cell_h,
+        )
+    };
+
+    let skin = theme::build_skin(theme);
+    let joined = join_paragraphs(&processed);
     let rendered = skin.text(&joined, Some(width)).to_string();
 
     // Output all lines — fzf handles scrolling internally.
@@ -170,10 +206,42 @@ pub fn preview(markdown: &str, theme_name: Option<&str>, start_line: Option<usiz
     let start_offset = start_line.unwrap_or(1).saturating_sub(1);
 
     let mut stdout = io::stdout().lock();
-    for line in lines.iter().skip(start_offset) {
+    for (i, line) in lines.iter().enumerate().skip(start_offset) {
         writeln!(stdout, "{line}")?;
+
+        // Emit inline images at their placeholder positions.
+        // The output line index (after start_offset) corresponds to the
+        // content row in the rendered text.
+        if has_graphics {
+            for placement in &placements {
+                if i == placement.content_row {
+                    // Flush text before emitting the image escape sequence.
+                    stdout.flush()?;
+                    match gfx {
+                        GraphicsProtocol::Kitty => {
+                            images::emit_kitty_image(
+                                &mut stdout,
+                                &placement.png_data,
+                                placement.cols,
+                                placement.rows,
+                            )?;
+                        }
+                        GraphicsProtocol::Sixel => {
+                            images::emit_sixel_image(
+                                &mut stdout,
+                                &placement.png_data,
+                                placement.cols,
+                                placement.rows,
+                            )?;
+                        }
+                        GraphicsProtocol::None => {}
+                    }
+                }
+            }
+        }
     }
 
+    stdout.flush()?;
     Ok(())
 }
 
@@ -1358,7 +1426,7 @@ fn run_inner_loop<'a>(
         // ── Handle input ─────────────────────────────────────────
         // Check for file changes periodically.
         // In follow mode, check every ~6 frames (~100ms); otherwise ~60 frames (~1s).
-        frame_count += 1;
+        frame_count = frame_count.wrapping_add(1);
         let check_interval = if follow_mode { 6 } else { 60 };
         if frame_count.is_multiple_of(check_interval)
             && let Some(path) = file_path

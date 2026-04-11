@@ -150,7 +150,7 @@ fn main() -> Result<()> {
             viewer::print_to_stdout(&markdown);
             return Ok(());
         } else if cli.preview {
-            return viewer::preview(&markdown, cli.theme.as_deref(), cli.line);
+            return viewer::preview(&markdown, cli.theme.as_deref(), cli.line, &base_dir);
         }
         return viewer::run(
             &markdown,
@@ -247,7 +247,7 @@ fn main() -> Result<()> {
         }
     } else if cli.preview {
         if is_markdown {
-            viewer::preview(&raw_content, cli.theme.as_deref(), cli.line)
+            viewer::preview(&raw_content, cli.theme.as_deref(), cli.line, &base_dir)
         } else {
             viewer::preview_code(
                 &raw_content,
@@ -317,7 +317,12 @@ fn view_stdin(
     }
 
     if preview {
-        return viewer::preview(&content, theme, line);
+        return viewer::preview(
+            &content,
+            theme,
+            line,
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        );
     }
 
     // Interactive mode: we need to reopen the TTY for crossterm since

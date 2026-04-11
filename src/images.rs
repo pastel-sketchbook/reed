@@ -493,6 +493,7 @@ pub fn emit_sixel_image<W: Write>(
     }
 
     // Emit sixel data, 6 rows at a time.
+    #[allow(clippy::cast_possible_truncation)] // u32 width always fits in usize
     let w_usize = width as usize;
     for band_y in (0..height).step_by(6) {
         // For each color in the palette, emit a row of sixel characters.
@@ -510,6 +511,7 @@ pub fn emit_sixel_image<W: Write>(
                 for bit in 0..6u32 {
                     let y = band_y + bit;
                     if y < height {
+                        #[allow(clippy::cast_possible_truncation)] // u32 fits in usize
                         let idx = (y as usize) * w_usize + x;
                         if indices[idx] == color_idx_u8 {
                             sixel_bits |= 1 << bit;
