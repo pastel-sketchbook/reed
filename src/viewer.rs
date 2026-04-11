@@ -177,24 +177,49 @@ pub fn preview(
         Vec::new()
     };
 
+    // Extract and render mermaid diagrams when graphics are available.
+    let mermaid_blocks = if has_graphics {
+        mermaid::extract_mermaid_blocks(markdown)
+    } else {
+        Vec::new()
+    };
+    let rendered_mermaids: Vec<(usize, Vec<u8>)> = mermaid_blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, block)| {
+            mermaid::render_to_png(&block.source, theme.bg).map(|png| (i, png))
+        })
+        .collect();
+
     let (cell_w, cell_h) = images::cell_size_px();
     #[allow(clippy::cast_possible_truncation)]
     let inner_cols = width.min(u16::MAX as usize) as u16;
 
-    // Build processed markdown: replace image lines with placeholders.
+    // Determine preview pane height for image sizing.
+    // Cap each individual image/diagram to half the pane height so that
+    // multiple diagrams can coexist without one consuming all the space.
+    let max_image_rows: Option<u16> = std::env::var("FZF_PREVIEW_LINES")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .or_else(|| terminal::size().ok().map(|(_, r)| r))
+        .map(|rows| (rows / 2).max(4));
+
+    // Build processed markdown: replace image/mermaid lines with placeholders.
     let highlighted = highlight::highlight_code_blocks(markdown, theme.bg);
-    let (processed, placements) = if image_refs.is_empty() {
-        (highlighted, Vec::new())
-    } else {
+    let has_replacements = !image_refs.is_empty() || !rendered_mermaids.is_empty();
+    let (processed, placements) = if has_replacements {
         build_processed_markdown(
             &highlighted,
             &image_refs,
-            &[], // no mermaid blocks in preview
-            &[], // no rendered mermaids in preview
+            &mermaid_blocks,
+            &rendered_mermaids,
             inner_cols,
+            max_image_rows,
             cell_w,
             cell_h,
         )
+    } else {
+        (highlighted, Vec::new())
     };
 
     let skin = theme::build_skin(theme);
@@ -206,6 +231,13 @@ pub fn preview(
     let start_offset = start_line.unwrap_or(1).saturating_sub(1);
 
     let mut stdout = io::stdout().lock();
+
+    // Delete any previously placed Kitty images so scrolling in the fzf
+    // preview pane doesn't leave ghost artifacts from a prior position.
+    if has_graphics && gfx == GraphicsProtocol::Kitty && !placements.is_empty() {
+        write!(stdout, "\x1b_Ga=d,d=A,q=2;\x1b\\")?;
+    }
+
     for (i, line) in lines.iter().enumerate().skip(start_offset) {
         writeln!(stdout, "{line}")?;
 
@@ -723,6 +755,7 @@ pub fn run(
                     &mermaid_blocks,
                     &rendered_mermaids,
                     inner_cols,
+                    None, // no height constraint in interactive viewer
                     cell_w,
                     cell_h,
                 );
@@ -1016,12 +1049,14 @@ struct Replacement {
 
 /// Build the processed markdown with image and mermaid placeholders, and
 /// return the resulting `ImagePlacement` entries for Kitty rendering.
+#[allow(clippy::too_many_arguments)]
 fn build_processed_markdown(
     markdown: &str,
     image_refs: &[images::ImageRef],
     mermaid_blocks: &[mermaid::MermaidBlock],
     rendered_mermaids: &[(usize, Vec<u8>)],
     inner_cols: u16,
+    max_image_rows: Option<u16>,
     cell_w: u16,
     cell_h: u16,
 ) -> (String, Vec<ImagePlacement>) {
@@ -1055,9 +1090,15 @@ fn build_processed_markdown(
         let block = &mermaid_blocks[block_idx];
 
         // Determine display size from the rendered PNG.
-        let (display_cols, display_rows, placeholder_rows) =
-            match images::load_image_from_bytes(png_data, inner_cols, cell_w, cell_h) {
-                Some((_, c, r)) => (c, r, r),
+        let (resized_png, display_cols, display_rows, placeholder_rows) =
+            match images::load_image_from_bytes(
+                png_data,
+                inner_cols,
+                max_image_rows,
+                cell_w,
+                cell_h,
+            ) {
+                Some((data, c, r)) => (data, c, r, r),
                 None => continue, // skip if we can't determine dimensions
             };
 
@@ -1065,7 +1106,7 @@ fn build_processed_markdown(
             start_line: block.fence_start_line,
             end_line: block.fence_end_line,
             placeholder_rows,
-            png_data: Some(png_data.clone()),
+            png_data: Some(resized_png),
             display_cols,
             display_rows,
             alt: String::from("mermaid diagram"),
@@ -1508,7 +1549,7 @@ fn emit_visible_images(
         // Content area starts at terminal row 1 (after header).
         #[allow(clippy::cast_possible_truncation)]
         let screen_row = if img_start >= viewport_top {
-            (img_start - viewport_top) as u16
+            img_start.saturating_sub(viewport_top) as u16
         } else {
             0 // image starts above viewport, show from top
         };
@@ -1594,7 +1635,7 @@ fn draw_toc_cell(
         } else if current + half >= total {
             total.saturating_sub(content_rows)
         } else {
-            current - half
+            current.saturating_sub(half)
         }
     };
 
@@ -1915,8 +1956,6 @@ fn build_key_hints() -> Vec<(HintStyle, &'static str)> {
     ]
 }
 
-// ── Size warning ──────────────────────────────────────────────────
-
 // ── Help overlay ──────────────────────────────────────────────────
 
 /// Help entries: (key, description).
@@ -2102,8 +2141,6 @@ fn rgb_to_color(rgb: libghostty_vt::style::RgbColor) -> Color {
         b: rgb.b,
     }
 }
-
-// ── ANSI-aware blank line stripping ───────────────────────────────
 
 // ── ANSI / heading helpers ───────────────────────────────────────
 
@@ -2640,6 +2677,7 @@ mod tests {
             &[], // no mermaid blocks
             &[], // no rendered mermaids
             80,
+            None,
             8,
             16,
         );
@@ -2656,7 +2694,8 @@ mod tests {
         let image_refs = images::extract_images(md, std::path::Path::new("/tmp"));
         assert_eq!(image_refs.len(), 1);
 
-        let (result, placements) = build_processed_markdown(md, &image_refs, &[], &[], 80, 8, 16);
+        let (result, placements) =
+            build_processed_markdown(md, &image_refs, &[], &[], 80, None, 8, 16);
 
         // The image line should have been replaced with placeholder blank line(s).
         assert!(!result.contains("![photo]"));
@@ -2675,7 +2714,7 @@ mod tests {
         let rendered = vec![(0usize, png)];
 
         let (result, placements) =
-            build_processed_markdown(md, &[], &mermaid_blocks, &rendered, 80, 8, 16);
+            build_processed_markdown(md, &[], &mermaid_blocks, &rendered, 80, None, 8, 16);
 
         // The mermaid fenced block should be replaced with placeholder lines.
         assert!(
@@ -2707,6 +2746,7 @@ mod tests {
             &mermaid_blocks,
             &[], // no renders — fallback to code block
             80,
+            None,
             8,
             16,
         );
@@ -2735,7 +2775,7 @@ End.\n";
         let rendered = vec![(0usize, png)];
 
         let (result, placements) =
-            build_processed_markdown(md, &image_refs, &mermaid_blocks, &rendered, 80, 8, 16);
+            build_processed_markdown(md, &image_refs, &mermaid_blocks, &rendered, 80, None, 8, 16);
 
         // Image line and mermaid block should both be replaced.
         assert!(!result.contains("![photo]"));

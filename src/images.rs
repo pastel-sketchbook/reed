@@ -278,14 +278,17 @@ pub fn load_image(
 }
 
 /// Load an image from in-memory bytes (e.g. a PNG rendered by mmdc),
-/// resize it to fit within `max_cols` terminal columns (preserving aspect
-/// ratio), and return re-encoded PNG bytes along with display dimensions
-/// in terminal cells.
+/// resize it to fit within `max_cols` terminal columns and `max_rows`
+/// terminal rows (preserving aspect ratio), and return re-encoded PNG
+/// bytes along with display dimensions in terminal cells.
+///
+/// When `max_rows` is `None`, only the width constraint is applied.
 ///
 /// Returns `None` if the bytes cannot be decoded as a valid image.
 pub fn load_image_from_bytes(
     data: &[u8],
     max_cols: u16,
+    max_rows: Option<u16>,
     cell_w: u16,
     cell_h: u16,
 ) -> Option<(Vec<u8>, u16, u16)> {
@@ -302,11 +305,11 @@ pub fn load_image_from_bytes(
         return None;
     }
 
-    // Maximum pixel width = max_cols * cell_width_px.
+    // Maximum pixel dimensions.
     let max_px_w = u32::from(max_cols) * u32::from(cell_w);
 
     // Scale down if wider than terminal, preserving aspect ratio.
-    let (target_w, target_h) = if orig_w > max_px_w {
+    let (mut target_w, mut target_h) = if orig_w > max_px_w {
         let scale = f64::from(max_px_w) / f64::from(orig_w);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let h = (f64::from(orig_h) * scale).round() as u32;
@@ -314,6 +317,18 @@ pub fn load_image_from_bytes(
     } else {
         (orig_w, orig_h)
     };
+
+    // Additionally constrain by height when a max_rows limit is provided.
+    if let Some(mr) = max_rows {
+        let max_px_h = u32::from(mr) * u32::from(cell_h);
+        if target_h > max_px_h {
+            let scale = f64::from(max_px_h) / f64::from(target_h);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let w = (f64::from(target_w) * scale).round() as u32;
+            target_w = w.max(1);
+            target_h = max_px_h;
+        }
+    }
 
     let resized = img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
 

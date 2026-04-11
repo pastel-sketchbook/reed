@@ -4,7 +4,8 @@
 //! or `theme.code_bg` rather than a raw `Color::Cyan` or `Color::DarkGrey`.
 //!
 //! Built-in themes are defined in [`THEMES`]. Users can add custom themes by
-//! placing TOML files in `~/.config/reed/themes/`. See [`load_user_themes`].
+//! placing TOML files in `~/.config/reed/themes/`. The combined list (built-in
+//! + user) is available via [`ALL_THEMES`]. See [`load_user_themes`].
 
 use std::path::PathBuf;
 use std::sync::LazyLock;

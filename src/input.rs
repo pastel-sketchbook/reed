@@ -643,7 +643,9 @@ pub fn extract_code_blocks(markdown: &str) -> Vec<CodeBlock> {
         if in_fence {
             // Check for closing fence: same char, at least same length, no other content.
             let trimmed = line.trim_start();
-            let closing_len = trimmed.len() - trimmed.trim_start_matches(fence_char).len();
+            let closing_len = trimmed
+                .len()
+                .saturating_sub(trimmed.trim_start_matches(fence_char).len());
             if closing_len >= fence_len && trimmed.trim_start_matches(fence_char).trim().is_empty()
             {
                 // Remove trailing newline from content if present.
@@ -663,7 +665,9 @@ pub fn extract_code_blocks(markdown: &str) -> Vec<CodeBlock> {
             // Check for opening fence: ``` or ~~~
             let trimmed = line.trim_start();
             for ch in ['`', '~'] {
-                let tick_len = trimmed.len() - trimmed.trim_start_matches(ch).len();
+                let tick_len = trimmed
+                    .len()
+                    .saturating_sub(trimmed.trim_start_matches(ch).len());
                 if tick_len >= 3 {
                     in_fence = true;
                     fence_char = ch;
