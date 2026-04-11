@@ -70,6 +70,11 @@ struct Cli {
     /// Used internally by fzf transform-header to update the header on theme change.
     #[arg(long)]
     print_header: bool,
+
+    /// Print the ANSI-styled border label (theme name) and exit.
+    /// Used internally by fzf transform-border-label on theme change.
+    #[arg(long)]
+    print_label: bool,
 }
 
 #[expect(clippy::too_many_lines)]
@@ -93,6 +98,14 @@ fn main() -> Result<()> {
         let prefs = config::load_preferences();
         let theme = &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         print!("{}", viewer::fzf_header_line(theme));
+        return Ok(());
+    }
+
+    // Print border label and exit (used by transform-border-label).
+    if cli.print_label {
+        let prefs = config::load_preferences();
+        let theme = &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
+        print!("{}", viewer::fzf_border_label(theme));
         return Ok(());
     }
 
@@ -391,8 +404,11 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     let next_theme_cmd = format!("{} --next-theme", shell_escape(&reed_bin));
     let prev_theme_cmd = format!("{} --prev-theme", shell_escape(&reed_bin));
 
-    // Header command: prints the styled shortcuts + theme name line.
+    // Header command: prints the styled shortcuts line.
     let header_cmd = format!("{} --print-header", shell_escape(&reed_bin));
+
+    // Border-label command: prints the theme name for the top-right label.
+    let label_cmd = format!("{} --print-label", shell_escape(&reed_bin));
 
     // Detect fd/fdfind once for the vendor-filter toggle.
     let fd_bin = if Command::new("fd")
@@ -447,22 +463,26 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         let initial_theme =
             &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         let initial_header = viewer::fzf_header_line(initial_theme);
+        let initial_label = viewer::fzf_border_label(initial_theme);
 
         let mut fzf = Command::new("fzf");
         fzf.arg("--height").arg("100%");
         fzf.arg("--preview").arg(&preview_cmd);
         fzf.arg("--preview-window").arg("right:64%");
-        // Static header showing shortcuts + current theme name.
+        // Static header showing shortcuts.
         fzf.arg("--header").arg(&initial_header);
+        // Theme name in the top-right corner of the outer border.
+        fzf.arg("--border-label").arg(&initial_label);
+        fzf.arg("--border-label-pos").arg("-2");
         // ctrl-/ cycles through preview layouts.
         fzf.arg("--bind")
             .arg("ctrl-/:change-preview-window(right:64%|up:70%|down:40%|hidden)");
-        // ctrl-n / ctrl-b cycle themes: update prefs, refresh preview, update header.
+        // ctrl-n / ctrl-b cycle themes: update prefs, refresh preview, update header + label.
         fzf.arg("--bind").arg(format!(
-            "ctrl-n:execute-silent({next_theme_cmd})+refresh-preview+transform-header({header_cmd})"
+            "ctrl-n:execute-silent({next_theme_cmd})+refresh-preview+transform-header({header_cmd})+transform-border-label({label_cmd})"
         ));
         fzf.arg("--bind").arg(format!(
-            "ctrl-b:execute-silent({prev_theme_cmd})+refresh-preview+transform-header({header_cmd})"
+            "ctrl-b:execute-silent({prev_theme_cmd})+refresh-preview+transform-header({header_cmd})+transform-border-label({label_cmd})"
         ));
 
         // ctrl-v: toggle vendor-file filter (only when not using piped candidates).

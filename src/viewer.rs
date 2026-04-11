@@ -60,18 +60,19 @@ fn ansi_fg(color: Color) -> String {
 pub fn fzf_header_line(theme: &Theme) -> String {
     let fg = ansi_fg(theme.fg);
     let accent = ansi_fg(theme.accent);
-    let muted = ansi_fg(theme.muted);
-    let heading = ansi_fg(theme.heading);
-    let sep = "\u{2502}"; // │
-
     format!(
-        "{accent}{ANSI_BOLD}^n/^b{ANSI_NORMAL} {fg}Theme {muted}{sep}\
-         {accent}{ANSI_BOLD} ^/{ANSI_NORMAL} {fg}Layout {muted}{sep}\
-         {accent}{ANSI_BOLD} ^v{ANSI_NORMAL} {fg}Vendor\n\
-         {accent}{ANSI_BOLD} enter{ANSI_NORMAL} {fg}Open\
-         {heading}  [{}]{ANSI_RESET}",
-        theme.name,
+        "{accent}{ANSI_BOLD}^n/^b{ANSI_NORMAL} {fg}Theme  \
+         {accent}{ANSI_BOLD}^/{ANSI_NORMAL} {fg}Layout  \
+         {accent}{ANSI_BOLD}^v{ANSI_NORMAL} {fg}Vendor  \
+         {accent}{ANSI_BOLD}enter{ANSI_NORMAL} {fg}Open{ANSI_RESET}",
     )
+}
+
+/// Build the ANSI-styled border label showing the current theme name.
+/// Placed at the top-right of the fzf outer border via `--border-label-pos`.
+pub fn fzf_border_label(theme: &Theme) -> String {
+    let heading = ansi_fg(theme.heading);
+    format!("{heading}{ANSI_BOLD} [{}] {ANSI_RESET}", theme.name)
 }
 
 /// Check whether the terminal likely supports the Kitty graphics protocol.
