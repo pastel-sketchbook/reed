@@ -1,5 +1,7 @@
 # reed
 
+![reed](screenshots/reed.png)
+
 Terminal file viewer with syntax highlighting, inline images, and Mermaid
 diagrams -- powered by [libghostty-vt](https://github.com/Uzaaft/libghostty-rs).
 
@@ -19,8 +21,8 @@ entirely and use syntect for direct syntax highlighting.
 - **Mermaid diagrams** rendered to inline images when `mmdc` is on PATH
 - **fzf integration** -- run `reed` with no arguments to get an interactive
   file picker with live preview; pipe a file list to narrow candidates
-- **Editor integration** -- code files open in your `$EDITOR`, `nvim`, or
-  `emacs` (first available); Markdown always uses the built-in viewer;
+- **Editor integration** -- code files open in `emacs`, `nvim`, or your
+  `$EDITOR` (first available); Markdown always uses the built-in viewer;
   use `--editor` to open any file directly in your editor
 - **Binary file viewing** -- binary files open in `hexyl` when installed
 - **Document viewing** -- Office files (docx, pptx, xlsx, odt, rtf, epub)
@@ -108,7 +110,7 @@ reed --line 42 <file>    # start at line 42
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Open file in viewer (or `$EDITOR`/nvim/emacs for code files) |
+| `Enter` | Open file in viewer (or emacs/nvim/`$EDITOR` for code files) |
 | `Ctrl-/` | Cycle preview layout |
 | `Ctrl-n` | Next theme |
 | `Ctrl-b` | Previous theme |
