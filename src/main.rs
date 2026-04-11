@@ -79,14 +79,21 @@ struct Cli {
 
 #[expect(clippy::too_many_lines)]
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // In preview / header / label modes, fzf captures both stdout and stderr
+    // of the preview command and displays them in the preview pane.  Force
+    // tracing off so log messages don't pollute the rendered preview —
+    // regardless of RUST_LOG.
+    let fzf_output_mode = cli.preview || cli.print_header || cli.print_label;
+    tracing_subscriber::fmt()
+        .with_env_filter(if fzf_output_mode {
+            tracing_subscriber::EnvFilter::new("off")
+        } else {
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+        })
+        .init();
 
     // Theme cycling mode: update preference and exit immediately.
     if cli.next_theme || cli.prev_theme {
