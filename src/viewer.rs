@@ -77,7 +77,11 @@ pub fn fzf_header_line(theme: &Theme) -> String {
 /// Placed at the top-right of the fzf outer border via `--border-label-pos`.
 pub fn fzf_border_label(theme: &Theme) -> String {
     let heading = ansi_fg(theme.heading);
-    format!("{heading}{ANSI_BOLD} [{}] {ANSI_RESET}", theme.name)
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        "{heading}{ANSI_BOLD} [{} v{version}] {ANSI_RESET}",
+        theme.name
+    )
 }
 
 /// Check whether the terminal likely supports the Kitty graphics protocol.
