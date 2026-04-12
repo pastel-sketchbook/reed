@@ -393,6 +393,131 @@ pub fn emit_kitty_image<W: Write>(w: &mut W, png_data: &[u8], cols: u16, rows: u
     Ok(())
 }
 
+/// The Kitty Unicode placeholder character.
+pub const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+/// Row/column diacritics table from the Kitty graphics protocol spec.
+/// Each entry maps a number (0–255) to a Unicode combining character.
+pub const ROW_COL_DIACRITICS: [char; 256] = [
+    '\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}', '\u{0312}', '\u{033D}', '\u{033E}', '\u{033F}',
+    '\u{0346}', '\u{034A}', '\u{034B}', '\u{034C}', '\u{0350}', '\u{0351}', '\u{0352}', '\u{0357}',
+    '\u{035B}', '\u{0363}', '\u{0364}', '\u{0365}', '\u{0366}', '\u{0367}', '\u{0368}', '\u{0369}',
+    '\u{036A}', '\u{036B}', '\u{036C}', '\u{036D}', '\u{036E}', '\u{036F}', '\u{0483}', '\u{0484}',
+    '\u{0485}', '\u{0486}', '\u{0487}', '\u{0592}', '\u{0593}', '\u{0594}', '\u{0595}', '\u{0597}',
+    '\u{0598}', '\u{0599}', '\u{059C}', '\u{059D}', '\u{059E}', '\u{059F}', '\u{05A0}', '\u{05A1}',
+    '\u{05A8}', '\u{05A9}', '\u{05AB}', '\u{05AC}', '\u{05AF}', '\u{05C4}', '\u{0610}', '\u{0611}',
+    '\u{0612}', '\u{0613}', '\u{0614}', '\u{0615}', '\u{0616}', '\u{0617}', '\u{0657}', '\u{0658}',
+    '\u{0659}', '\u{065A}', '\u{065B}', '\u{065D}', '\u{065E}', '\u{06D6}', '\u{06D7}', '\u{06D8}',
+    '\u{06D9}', '\u{06DA}', '\u{06DB}', '\u{06DC}', '\u{06DF}', '\u{06E0}', '\u{06E1}', '\u{06E2}',
+    '\u{06E4}', '\u{06E7}', '\u{06E8}', '\u{06EB}', '\u{06EC}', '\u{0730}', '\u{0732}', '\u{0733}',
+    '\u{0735}', '\u{0736}', '\u{073A}', '\u{073D}', '\u{073F}', '\u{0740}', '\u{0741}', '\u{0743}',
+    '\u{0745}', '\u{0747}', '\u{0749}', '\u{074A}', '\u{07EB}', '\u{07EC}', '\u{07ED}', '\u{07EE}',
+    '\u{07EF}', '\u{07F0}', '\u{07F1}', '\u{07F3}', '\u{0816}', '\u{0817}', '\u{0818}', '\u{0819}',
+    '\u{081B}', '\u{081C}', '\u{081D}', '\u{081E}', '\u{081F}', '\u{0820}', '\u{0821}', '\u{0822}',
+    '\u{0823}', '\u{0825}', '\u{0826}', '\u{0827}', '\u{0829}', '\u{082A}', '\u{082B}', '\u{082C}',
+    '\u{082D}', '\u{0951}', '\u{0953}', '\u{0954}', '\u{0F82}', '\u{0F83}', '\u{0F86}', '\u{0F87}',
+    '\u{135D}', '\u{135E}', '\u{135F}', '\u{17DD}', '\u{193A}', '\u{1A17}', '\u{1A75}', '\u{1A76}',
+    '\u{1A77}', '\u{1A78}', '\u{1A79}', '\u{1A7A}', '\u{1A7B}', '\u{1A7C}', '\u{1B6B}', '\u{1B6D}',
+    '\u{1B6E}', '\u{1B6F}', '\u{1B70}', '\u{1B71}', '\u{1B72}', '\u{1B73}', '\u{1CD0}', '\u{1CD1}',
+    '\u{1CD2}', '\u{1CDA}', '\u{1CDB}', '\u{1CE0}', '\u{1DC0}', '\u{1DC1}', '\u{1DC3}', '\u{1DC4}',
+    '\u{1DC5}', '\u{1DC6}', '\u{1DC7}', '\u{1DC8}', '\u{1DC9}', '\u{1DCB}', '\u{1DCC}', '\u{1DD1}',
+    '\u{1DD2}', '\u{1DD3}', '\u{1DD4}', '\u{1DD5}', '\u{1DD6}', '\u{1DD7}', '\u{1DD8}', '\u{1DD9}',
+    '\u{1DDA}', '\u{1DDB}', '\u{1DDC}', '\u{1DDD}', '\u{1DDE}', '\u{1DDF}', '\u{1DE0}', '\u{1DE1}',
+    '\u{1DE2}', '\u{1DE3}', '\u{1DE4}', '\u{1DE5}', '\u{1DE6}', '\u{1DFE}', '\u{20D0}', '\u{20D1}',
+    '\u{20D4}', '\u{20D5}', '\u{20D6}', '\u{20D7}', '\u{20DB}', '\u{20DC}', '\u{20E1}', '\u{20E7}',
+    '\u{20E9}', '\u{20F0}', '\u{2CEF}', '\u{2CF0}', '\u{2CF1}', '\u{2DE0}', '\u{2DE1}', '\u{2DE2}',
+    '\u{2DE3}', '\u{2DE4}', '\u{2DE5}', '\u{2DE6}', '\u{2DE7}', '\u{2DE8}', '\u{2DE9}', '\u{2DEA}',
+    '\u{2DEB}', '\u{2DEC}', '\u{2DED}', '\u{2DEE}', '\u{2DEF}', '\u{2DF0}', '\u{2DF1}', '\u{2DF2}',
+    '\u{2DF3}', '\u{2DF4}', '\u{2DF5}', '\u{2DF6}', '\u{2DF7}', '\u{2DF8}', '\u{2DF9}', '\u{2DFA}',
+    '\u{2DFB}', '\u{2DFC}', '\u{2DFD}', '\u{2DFE}', '\u{2DFF}', '\u{A66F}', '\u{A674}', '\u{A675}',
+    '\u{A676}', '\u{A677}', '\u{A678}', '\u{A679}', '\u{A67A}', '\u{A67B}', '\u{A67C}', '\u{A67D}',
+];
+
+/// Transmit a PNG image via Kitty protocol and generate Unicode placeholder
+/// text lines that will display the image inline with the text stream.
+///
+/// This approach makes images scroll with text naturally, solving the
+/// "floating image" problem in fzf preview panes.
+///
+/// Returns the placeholder text lines (including ANSI color escapes) that
+/// should be written to stdout in place of the image. Each line corresponds
+/// to one row of the image.
+pub fn emit_kitty_unicode_placeholder<W: Write>(
+    w: &mut W,
+    png_data: &[u8],
+    image_id: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<Vec<String>> {
+    // Step 1: Transmit image data (a=t, transmit only, do not display)
+    let encoded = BASE64.encode(png_data);
+    let bytes = encoded.as_bytes();
+
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut offset = 0;
+    let mut first = true;
+
+    while offset < bytes.len() {
+        let end = (offset + CHUNK_SIZE).min(bytes.len());
+        let chunk = &bytes[offset..end];
+        let more = i32::from(end < bytes.len());
+
+        if first {
+            write!(w, "\x1b_Ga=t,f=100,q=2,i={image_id},m={more};")?;
+            first = false;
+        } else {
+            write!(w, "\x1b_Gm={more};")?;
+        }
+        w.write_all(chunk)?;
+        w.write_all(b"\x1b\\")?;
+        offset = end;
+    }
+
+    // Step 2: Create virtual placement (U=1)
+    write!(w, "\x1b_Ga=p,U=1,i={image_id},c={cols},r={rows},q=2;\x1b\\")?;
+
+    // Step 3: Build placeholder text lines
+    // Image ID is encoded as RGB: R = (id >> 16) & 0xFF, G = (id >> 8) & 0xFF, B = id & 0xFF
+    let r = (image_id >> 16) & 0xFF;
+    let g = (image_id >> 8) & 0xFF;
+    let b = image_id & 0xFF;
+    let fg_on = format!("\x1b[38;2;{r};{g};{b}m");
+    let fg_off = "\x1b[39m";
+
+    let mut lines = Vec::with_capacity(usize::from(rows));
+
+    for row in 0..rows {
+        let row_idx = usize::from(row).min(ROW_COL_DIACRITICS.len() - 1);
+        let row_diacritic = ROW_COL_DIACRITICS[row_idx];
+
+        let mut line = String::new();
+        line.push_str(&fg_on);
+
+        for col in 0..cols {
+            line.push(KITTY_PLACEHOLDER);
+            if col == 0 {
+                // First cell: specify row diacritic (column auto-starts at 0)
+                line.push(row_diacritic);
+            }
+            // Subsequent cells: auto-inherit row, auto-increment column
+        }
+
+        line.push_str(fg_off);
+        lines.push(line);
+    }
+
+    Ok(lines)
+}
+
+/// Delete a Kitty image by ID (virtual placements + image data).
+pub fn delete_kitty_image_by_id<W: Write>(w: &mut W, image_id: u32) -> Result<()> {
+    write!(w, "\x1b_Ga=d,d=I,i={image_id},q=2;\x1b\\")?;
+    Ok(())
+}
+
 // ── Sixel graphics protocol ──────────────────────────────────────
 
 /// Maximum number of colors in the Sixel palette.
@@ -577,6 +702,58 @@ pub fn emit_sixel_image<W: Write>(
     write!(w, "\x1b\\")?;
 
     Ok(())
+}
+
+// ── Image cropping for viewport clipping ──────────────────────────
+
+/// Crop a PNG image vertically so that only the rows visible within the
+/// viewport are retained.  Returns the cropped PNG bytes, or `None` if
+/// the image cannot be decoded.
+///
+/// * `skip_rows` — how many cell rows to remove from the top (image
+///   starts above the viewport).
+/// * `keep_rows` — how many cell rows to keep (the visible portion).
+/// * `cell_h` — height of a single terminal cell in pixels.
+///
+/// Both parameters are in **terminal cell rows**, not pixels.
+pub fn crop_image_vertically(
+    png_data: &[u8],
+    total_rows: u16,
+    skip_rows: u16,
+    keep_rows: u16,
+    cell_h: u16,
+) -> Option<Vec<u8>> {
+    // Nothing to crop — fast path.
+    if skip_rows == 0 && keep_rows >= total_rows {
+        return Some(png_data.to_vec());
+    }
+
+    let img = image::load_from_memory(png_data).ok()?;
+    let (img_w, img_h) = img.dimensions();
+    if img_w == 0 || img_h == 0 {
+        return None;
+    }
+
+    // Convert cell rows to pixel offsets.
+    let px_skip = u32::from(skip_rows) * u32::from(cell_h);
+    let px_keep = u32::from(keep_rows) * u32::from(cell_h);
+
+    let y_start = px_skip.min(img_h);
+    let y_end = (px_skip + px_keep).min(img_h);
+    if y_end <= y_start {
+        return None;
+    }
+
+    let cropped = img.crop_imm(0, y_start, img_w, y_end - y_start);
+
+    // Re-encode as PNG.
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    cropped
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .ok()?;
+
+    Some(buf)
 }
 
 // ── Convenience: compute rows_per_image ───────────────────────────

@@ -28,6 +28,11 @@ use crate::theme::{self, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, Theme};
 /// Horizontal padding (spaces) on each side of header, content, and footer.
 const SIDE_PAD: u16 = 2;
 
+/// Unicode OBJECT REPLACEMENT CHARACTER used as a prefix for image placeholder
+/// markers.  After termimad rendering we scan for these to locate the true
+/// VT-row positions of each image.
+const IMG_MARKER: char = '\u{FFFC}';
+
 /// Return the ANSI escape to set the background color, or empty string for
 /// `Color::Reset` (transparent / terminal default).
 fn ansi_bg(color: Color) -> String {
@@ -201,8 +206,7 @@ pub fn preview(
     let max_image_rows: Option<u16> = std::env::var("FZF_PREVIEW_LINES")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
-        .or_else(|| terminal::size().ok().map(|(_, r)| r))
-        .map(|rows| (rows / 2).max(4));
+        .or_else(|| terminal::size().ok().map(|(_, r)| r));
 
     // Build processed markdown: replace image/mermaid lines with placeholders.
     let highlighted = highlight::highlight_code_blocks(markdown, theme.bg);
@@ -226,50 +230,89 @@ pub fn preview(
     let joined = join_paragraphs(&processed);
     let rendered = skin.text(&joined, Some(width)).to_string();
 
+    // Resolve placeholder markers to actual rendered-line positions and
+    // strip marker characters so they don't appear in output.
+    let mut placements = placements;
+    let rendered = {
+        let tmp = rendered.replace('\n', "\r\n");
+        let cleaned = map_placements_to_vt_rows(&tmp, &mut placements);
+        cleaned.replace("\r\n", "\n")
+    };
+
     // Output all lines — fzf handles scrolling internally.
     let lines: Vec<&str> = rendered.lines().collect();
     let start_offset = start_line.unwrap_or(1).saturating_sub(1);
 
     let mut stdout = io::stdout().lock();
 
-    // Delete any previously placed Kitty images so scrolling in the fzf
-    // preview pane doesn't leave ghost artifacts from a prior position.
+    // For Kitty terminals, use Unicode placeholders so images scroll with
+    // text naturally inside the fzf preview pane.  For other protocols,
+    // images are not supported in preview mode (would leave residue).
     if has_graphics && gfx == GraphicsProtocol::Kitty && !placements.is_empty() {
-        write!(stdout, "\x1b_Ga=d,d=A,q=2;\x1b\\")?;
-    }
+        // Write Kitty protocol escape sequences (delete, transmit, placement
+        // creation) directly to /dev/tty, bypassing fzf's stdout capture.
+        // This prevents ghost artifacts: fzf only sees the Unicode placeholder
+        // text in stdout, so scrolling/re-rendering never re-transmits images.
+        let mut tty = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/tty")
+            .context("open /dev/tty for Kitty graphics")?;
 
-    for (i, line) in lines.iter().enumerate().skip(start_offset) {
-        writeln!(stdout, "{line}")?;
+        // Delete any previously transmitted images from prior preview invocations.
+        for idx in 0..placements.len() {
+            #[allow(clippy::cast_possible_truncation)]
+            let image_id = (idx as u32).wrapping_add(1);
+            let _ = images::delete_kitty_image_by_id(&mut tty, image_id);
+        }
 
-        // Emit inline images at their placeholder positions.
-        // The output line index (after start_offset) corresponds to the
-        // content row in the rendered text.
-        if has_graphics {
-            for placement in &placements {
+        // Pre-generate Unicode placeholder lines for each image.
+        let mut placeholder_lines: Vec<Option<Vec<String>>> = Vec::with_capacity(placements.len());
+        for (idx, placement) in placements.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let image_id = (idx as u32).wrapping_add(1);
+            match images::emit_kitty_unicode_placeholder(
+                &mut tty,
+                &placement.png_data,
+                image_id,
+                placement.cols,
+                placement.rows,
+            ) {
+                Ok(lines) => placeholder_lines.push(Some(lines)),
+                Err(_) => placeholder_lines.push(None),
+            }
+        }
+        tty.flush()?;
+
+        // Emit lines, replacing placeholder positions with Unicode placeholder text.
+        for (i, line) in lines.iter().enumerate().skip(start_offset) {
+            // Check if any placement starts at this content row.
+            let mut emitted_image = false;
+            for (p_idx, placement) in placements.iter().enumerate() {
                 if i == placement.content_row {
-                    // Flush text before emitting the image escape sequence.
-                    stdout.flush()?;
-                    match gfx {
-                        GraphicsProtocol::Kitty => {
-                            images::emit_kitty_image(
-                                &mut stdout,
-                                &placement.png_data,
-                                placement.cols,
-                                placement.rows,
-                            )?;
+                    if let Some(Some(ph_lines)) = placeholder_lines.get(p_idx) {
+                        for ph_line in ph_lines {
+                            writeln!(stdout, "{ph_line}")?;
                         }
-                        GraphicsProtocol::Sixel => {
-                            images::emit_sixel_image(
-                                &mut stdout,
-                                &placement.png_data,
-                                placement.cols,
-                                placement.rows,
-                            )?;
-                        }
-                        GraphicsProtocol::None => {}
+                        emitted_image = true;
                     }
+                    break;
                 }
             }
+            if !emitted_image {
+                // Skip lines that fall within a placeholder's row span
+                // (these are the ZWSP padding lines from build_processed_markdown).
+                let in_placeholder = placements
+                    .iter()
+                    .any(|p| i > p.content_row && i < p.content_row + usize::from(p.rows));
+                if !in_placeholder {
+                    writeln!(stdout, "{line}")?;
+                }
+            }
+        }
+    } else {
+        // Non-Kitty or no images: just output text lines.
+        for (_i, line) in lines.iter().enumerate().skip(start_offset) {
+            writeln!(stdout, "{line}")?;
         }
     }
 
@@ -767,6 +810,12 @@ pub fn run(
                     .to_string();
                 let ansi = rendered.replace('\n', "\r\n");
                 let ansi = strip_leading_blank_lines(&ansi).to_string();
+
+                // Resolve placeholder markers to actual VT row positions and
+                // strip the marker characters from the ANSI text.
+                let mut placements = placements;
+                let ansi = map_placements_to_vt_rows(&ansi, &mut placements);
+
                 (ansi, placements)
             };
 
@@ -825,6 +874,7 @@ pub fn run(
                 buffer_info,
                 h_offset,
                 follow_mode,
+                cell_h,
             )? {
                 LoopExit::Quit => break,
                 LoopExit::BufferNext => {
@@ -1049,6 +1099,15 @@ struct Replacement {
 
 /// Build the processed markdown with image and mermaid placeholders, and
 /// return the resulting `ImagePlacement` entries for Kitty rendering.
+///
+/// Each replacement block is represented by:
+///   - A **marker line** (`\u{FFFC}<index>`) that survives termimad rendering
+///     and can be located in the post-render ANSI output.
+///   - `placeholder_rows - 1` additional filler lines to reserve vertical
+///     space for the image.
+///
+/// Callers must call `map_placements_to_vt_rows` after termimad rendering
+/// to resolve the true VT row positions before displaying images.
 #[allow(clippy::too_many_arguments)]
 fn build_processed_markdown(
     markdown: &str,
@@ -1124,7 +1183,7 @@ fn build_processed_markdown(
     // Build processed markdown and placements.
     let mut output = String::with_capacity(markdown.len());
     let mut placements = Vec::new();
-    let mut output_line_count: usize = 0;
+    let mut placement_idx: usize = 0;
     let mut repl_idx = 0;
     let mut skip_until: Option<usize> = None;
 
@@ -1140,24 +1199,29 @@ fn build_processed_markdown(
         if repl_idx < replacements.len() && idx == replacements[repl_idx].start_line {
             let repl = &replacements[repl_idx];
 
-            // Record the output line where this placeholder starts.
-            let content_row = output_line_count;
+            // First placeholder line: a unique marker that survives termimad
+            // rendering.  `map_placements_to_vt_rows` will scan for it later
+            // to discover the actual VT row position.
+            let _ = writeln!(output, "{IMG_MARKER}{placement_idx}");
 
-            // Insert blank placeholder lines.
-            for _ in 0..repl.placeholder_rows {
-                output.push('\n');
-                output_line_count += 1;
+            // Remaining placeholder lines: each contains a non-collapsible
+            // character so termimad preserves the line count.
+            for _ in 1..repl.placeholder_rows {
+                output.push_str("\u{200B}\n");
             }
 
             // Create placement if we have PNG data.
+            // `content_row` is set to 0 here as a placeholder; it will be
+            // resolved to the correct VT row by `map_placements_to_vt_rows`.
             if let Some(ref png_data) = repl.png_data {
                 placements.push(ImagePlacement {
                     png_data: png_data.clone(),
-                    content_row,
+                    content_row: 0, // resolved post-termimad
                     cols: repl.display_cols,
                     rows: repl.display_rows,
                     alt: repl.alt.clone(),
                 });
+                placement_idx += 1;
             }
 
             // Skip remaining lines of multi-line replacements.
@@ -1169,7 +1233,6 @@ fn build_processed_markdown(
         } else {
             output.push_str(line);
             output.push('\n');
-            output_line_count += 1;
         }
     }
 
@@ -1179,6 +1242,50 @@ fn build_processed_markdown(
     }
 
     (output, placements)
+}
+
+/// Scan the post-termimad ANSI text for image placement markers and update
+/// each placement's `content_row` to the actual VT row.
+///
+/// The ANSI text uses `\r\n` line endings (already converted before this
+/// call).  Returns a new string with all marker characters removed so they
+/// don't consume visual space in the VT terminal.
+fn map_placements_to_vt_rows(ansi_text: &str, placements: &mut [ImagePlacement]) -> String {
+    if placements.is_empty() {
+        return ansi_text.to_string();
+    }
+
+    let marker_str = IMG_MARKER.to_string();
+    let mut cleaned = String::with_capacity(ansi_text.len());
+
+    for (current_row, line) in ansi_text.split("\r\n").enumerate() {
+        let stripped = strip_ansi_codes(line);
+
+        // Check if this line contains an image marker.
+        if let Some(rest) = stripped.strip_prefix(IMG_MARKER) {
+            // Parse the placement index from the marker.
+            let idx_str = rest.trim();
+            if let Ok(idx) = idx_str.parse::<usize>()
+                && idx < placements.len()
+            {
+                placements[idx].content_row = current_row;
+            }
+            // Emit the line with the marker character stripped out so it
+            // doesn't consume a visible cell in the VT terminal.
+            cleaned.push_str(&line.replace(&marker_str, ""));
+        } else {
+            cleaned.push_str(line);
+        }
+
+        cleaned.push_str("\r\n");
+    }
+
+    // Remove the trailing \r\n added by the last iteration.
+    if cleaned.ends_with("\r\n") {
+        cleaned.truncate(cleaned.len() - 2);
+    }
+
+    cleaned
 }
 
 /// Persist the current theme choice to disk (best-effort).
@@ -1212,6 +1319,7 @@ fn run_inner_loop<'a>(
     buffer_info: Option<(usize, usize)>,
     h_offset: usize,
     follow_mode: bool,
+    cell_h: u16,
 ) -> Result<LoopExit> {
     let mut frame_count: u32 = 0;
     loop {
@@ -1439,10 +1547,28 @@ fn run_inner_loop<'a>(
                     // Delete all previously placed Kitty images to prevent ghost
                     // artifacts when scrolling.  q=2 suppresses terminal responses.
                     write!(stdout, "\x1b_Ga=d,q=2;\x1b\\")?;
-                    emit_visible_images(stdout, term, placements, content_rows, content_y, gfx)?;
+                    emit_visible_images(
+                        stdout,
+                        term,
+                        placements,
+                        content_rows,
+                        content_y,
+                        toc_width,
+                        cell_h,
+                        gfx,
+                    )?;
                 }
                 GraphicsProtocol::Sixel => {
-                    emit_visible_images(stdout, term, placements, content_rows, content_y, gfx)?;
+                    emit_visible_images(
+                        stdout,
+                        term,
+                        placements,
+                        content_rows,
+                        content_y,
+                        toc_width,
+                        cell_h,
+                        gfx,
+                    )?;
                 }
                 GraphicsProtocol::None => {} // unreachable if placements is non-empty
             }
@@ -1522,18 +1648,25 @@ fn run_inner_loop<'a>(
 /// Uses `Terminal::scrollbar()` to determine the scroll offset, then maps
 /// each `ImagePlacement::content_row` to a screen row. Images that are
 /// partially or fully off-screen are skipped.
+#[allow(clippy::too_many_arguments)]
 fn emit_visible_images(
     stdout: &mut io::Stdout,
     term: &Terminal<'_, '_>,
     placements: &[ImagePlacement],
     content_rows: u16,
     content_y: u16,
+    toc_width: u16,
+    cell_h: u16,
     gfx: GraphicsProtocol,
 ) -> Result<()> {
     // Determine the scroll offset: which document row is at the top of the viewport.
     let scrollbar = term.scrollbar().context("VT scrollbar query")?;
     #[allow(clippy::cast_possible_truncation)]
     let viewport_top = scrollbar.offset as usize;
+
+    // Horizontal position: images start after the TOC sidebar (if visible)
+    // plus the standard left padding.
+    let img_x = toc_width + SIDE_PAD;
 
     for placement in placements {
         let img_start = placement.content_row;
@@ -1545,37 +1678,57 @@ fn emit_visible_images(
             continue; // entirely off-screen
         }
 
-        // Screen row where the image starts (relative to content area).
-        // Content area starts at terminal row 1 (after header).
+        // How many rows of the image are clipped at the top (image starts
+        // above the current viewport).
+        #[allow(clippy::cast_possible_truncation)]
+        let skip_rows = viewport_top
+            .saturating_sub(img_start)
+            .min(u16::MAX as usize) as u16;
+
+        // Screen row where the visible portion starts.
         #[allow(clippy::cast_possible_truncation)]
         let screen_row = if img_start >= viewport_top {
             img_start.saturating_sub(viewport_top) as u16
         } else {
-            0 // image starts above viewport, show from top
+            0
         };
 
-        // Position cursor at the image location (left padding + content area).
+        // Clamp to the available content area so the image never extends
+        // beyond the footer or terminal border.
+        let available_rows = content_rows.saturating_sub(screen_row);
+        let visible_rows = (placement.rows - skip_rows).min(available_rows);
+        if visible_rows == 0 {
+            continue;
+        }
+
+        // Crop the PNG to only the visible vertical slice.  This is
+        // essential for Sixel (which has no display-size parameter) and
+        // also ensures Kitty doesn't scale-squish a tall image into fewer
+        // rows.
+        let cropped = images::crop_image_vertically(
+            &placement.png_data,
+            placement.rows,
+            skip_rows,
+            visible_rows,
+            cell_h,
+        );
+        let png_data = match cropped.as_deref() {
+            Some(data) => data,
+            None => continue, // decode failure — skip image to avoid overflow
+        };
+
+        // Position cursor at the image location (after TOC + left padding).
         // NOTE: no flush here — everything stays buffered until the single
         // frame-end flush so delete + re-emit is atomic (no blink).
-        queue!(stdout, cursor::MoveTo(SIDE_PAD, screen_row + content_y))?;
+        queue!(stdout, cursor::MoveTo(img_x, screen_row + content_y))?;
 
-        // Emit the image via the detected graphics protocol.
+        // Emit the cropped image via the detected graphics protocol.
         match gfx {
             GraphicsProtocol::Kitty => {
-                images::emit_kitty_image(
-                    stdout,
-                    &placement.png_data,
-                    placement.cols,
-                    placement.rows,
-                )?;
+                images::emit_kitty_image(stdout, png_data, placement.cols, visible_rows)?;
             }
             GraphicsProtocol::Sixel => {
-                images::emit_sixel_image(
-                    stdout,
-                    &placement.png_data,
-                    placement.cols,
-                    placement.rows,
-                )?;
+                images::emit_sixel_image(stdout, png_data, placement.cols, visible_rows)?;
             }
             GraphicsProtocol::None => {} // should not reach here
         }
@@ -2344,6 +2497,11 @@ fn is_code_fence(line: &str) -> bool {
 fn is_structural(line: &str) -> bool {
     let trimmed = line.trim_start();
 
+    // Image placeholder markers — never join these.  Check the *untrimmed*
+    // line for the filler character because trim_start strips \u{200B}.
+    if trimmed.starts_with(IMG_MARKER) || line.starts_with('\u{200B}') {
+        return true;
+    }
     // Headings
     if trimmed.starts_with('#') {
         return true;
@@ -2728,9 +2886,13 @@ mod tests {
         // We should have one placement for the diagram.
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].alt, "mermaid diagram");
+        // content_row is 0 (placeholder) before map_placements_to_vt_rows.
+        assert_eq!(placements[0].content_row, 0);
         // The text before and after should be preserved.
         assert!(result.contains("# Title"));
         assert!(result.contains("More text."));
+        // The result should contain the marker for post-termimad scanning.
+        assert!(result.contains('\u{FFFC}'));
     }
 
     #[test]
@@ -2784,6 +2946,75 @@ End.\n";
         // One placement for mermaid (image file doesn't exist, so no image placement).
         assert_eq!(placements.len(), 1);
         assert!(result.contains("End."));
+    }
+
+    #[test]
+    fn map_placements_resolves_marker_rows() {
+        // Simulate ANSI text with a marker at row 3 (0-indexed).
+        let ansi = "line 0\r\nline 1\r\nline 2\r\n\u{FFFC}0\r\n\u{200B}\r\n\u{200B}\r\nline 6";
+        let mut placements = vec![ImagePlacement {
+            png_data: vec![],
+            content_row: 0, // will be resolved
+            cols: 10,
+            rows: 3,
+            alt: "test".to_string(),
+        }];
+
+        let cleaned = map_placements_to_vt_rows(ansi, &mut placements);
+
+        // The marker was on line index 3, so content_row should be 3.
+        assert_eq!(placements[0].content_row, 3);
+        // The marker character should be stripped from output.
+        assert!(!cleaned.contains('\u{FFFC}'));
+        // Other content should remain.
+        assert!(cleaned.contains("line 0"));
+        assert!(cleaned.contains("line 6"));
+    }
+
+    #[test]
+    fn map_placements_multiple_markers() {
+        let ansi = "\u{FFFC}0\r\nfiller\r\n\u{FFFC}1\r\nmore";
+        let mut placements = vec![
+            ImagePlacement {
+                png_data: vec![],
+                content_row: 0,
+                cols: 5,
+                rows: 1,
+                alt: "a".to_string(),
+            },
+            ImagePlacement {
+                png_data: vec![],
+                content_row: 0,
+                cols: 5,
+                rows: 1,
+                alt: "b".to_string(),
+            },
+        ];
+
+        let cleaned = map_placements_to_vt_rows(ansi, &mut placements);
+
+        assert_eq!(placements[0].content_row, 0);
+        assert_eq!(placements[1].content_row, 2);
+        assert!(!cleaned.contains('\u{FFFC}'));
+    }
+
+    #[test]
+    fn map_placements_with_ansi_codes() {
+        // Marker line may contain ANSI codes from termimad rendering.
+        let ansi = "\x1b[1mheading\x1b[0m\r\n\x1b[0m\u{FFFC}0\x1b[0m\r\nbody";
+        let mut placements = vec![ImagePlacement {
+            png_data: vec![],
+            content_row: 0,
+            cols: 5,
+            rows: 1,
+            alt: "img".to_string(),
+        }];
+
+        let cleaned = map_placements_to_vt_rows(ansi, &mut placements);
+
+        // Marker was on row 1 (after stripping ANSI for scanning).
+        assert_eq!(placements[0].content_row, 1);
+        assert!(!cleaned.contains('\u{FFFC}'));
     }
 
     #[test]
@@ -3040,5 +3271,56 @@ End.\n";
     #[test]
     fn css_color_reset() {
         assert_eq!(css_color(Color::Reset), "inherit");
+    }
+
+    /// Verify that placeholder lines (marker + ZWSP filler) survive the
+    /// full join_paragraphs → termimad pipeline with the correct count.
+    #[test]
+    fn placeholder_rows_survive_termimad() {
+        for placeholder_count in [1, 3, 5, 10, 20] {
+            // Simulate placeholder rows (1 marker + N-1 ZWSP filler) between
+            // a heading and a paragraph.
+            let mut md = String::from("# Title\n\n");
+            md.push_str(&format!("{IMG_MARKER}0\n"));
+            for _ in 1..placeholder_count {
+                md.push_str("\u{200B}\n");
+            }
+            md.push_str("\nSome text after.\n");
+
+            let joined = join_paragraphs(&md);
+            let skin = crate::theme::build_skin(&crate::theme::ALL_THEMES[0]);
+            let rendered = skin.text(&joined, Some(80)).to_string();
+            let ansi = rendered.replace('\n', "\r\n");
+
+            let mut placements = vec![ImagePlacement {
+                png_data: vec![],
+                content_row: 0,
+                cols: 10,
+                rows: placeholder_count as u16,
+                alt: "test".to_string(),
+            }];
+            let cleaned = map_placements_to_vt_rows(&ansi, &mut placements);
+
+            let marker_row = placements[0].content_row;
+            let cleaned_lines: Vec<&str> = cleaned.split("\r\n").collect();
+            let text_row = cleaned_lines
+                .iter()
+                .position(|l| strip_ansi_codes(l).contains("Some text after"))
+                .expect("should find 'Some text after'");
+
+            let actual_reserved = text_row - marker_row;
+
+            eprintln!(
+                "placeholder_count={placeholder_count}: marker_row={marker_row}, \
+                 text_row={text_row}, actual_reserved={actual_reserved}"
+            );
+
+            assert!(
+                actual_reserved >= placeholder_count,
+                "placeholder_count={placeholder_count}: only {actual_reserved} rows reserved, \
+                 image would overlap text by {} rows",
+                placeholder_count - actual_reserved
+            );
+        }
     }
 }
