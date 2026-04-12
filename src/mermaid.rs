@@ -1,10 +1,11 @@
 //! Mermaid diagram rendering support.
 //!
 //! Detects ` ```mermaid ` fenced code blocks in markdown, renders them to PNG
-//! via the `mmdc` CLI (mermaid-cli), and returns them as image data that the
-//! Kitty graphics pipeline can display inline.
+//! via either `mmdz` or `mmdc` (mermaid-cli), and returns them as image data
+//! that the graphics pipeline can display inline.
 //!
-//! If `mmdc` is not installed, the code block is left as-is (graceful fallback).
+//! Detection order: `~/bin/mmdz` → `mmdz` on PATH → `mmdc` on PATH.
+//! If neither is installed, the code block is left as-is (graceful fallback).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,8 +15,17 @@ use std::sync::OnceLock;
 use crossterm::style::Color;
 use tracing::{debug, info, warn};
 
-/// Cached result of checking whether `mmdc` is available on PATH.
-static MMDC_AVAILABLE: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// Which mermaid renderer is available.
+#[derive(Debug, Clone)]
+enum MermaidBackend {
+    /// `mmdz` — native Zig renderer producing SVG/PNG.
+    Mmdz(PathBuf),
+    /// `mmdc` — Node.js mermaid-cli producing PNG via Puppeteer.
+    Mmdc(PathBuf),
+}
+
+/// Cached result of backend detection.
+static BACKEND: OnceLock<Option<MermaidBackend>> = OnceLock::new();
 
 /// A mermaid code block extracted from markdown.
 #[derive(Debug, Clone)]
@@ -28,39 +38,89 @@ pub struct MermaidBlock {
     pub fence_end_line: usize,
 }
 
-/// Check whether `mmdc` (mermaid-cli) is available on PATH.
+/// Check whether a mermaid backend (`mmdz` or `mmdc`) is available.
 ///
+/// Detection order: `~/bin/mmdz` → `mmdz` on PATH → `mmdc` on PATH.
 /// The result is cached for the lifetime of the process.
 pub fn mmdc_available() -> bool {
-    MMDC_AVAILABLE
+    BACKEND
         .get_or_init(|| {
-            match Command::new("mmdc").arg("--version").output() {
-                Ok(output) if output.status.success() => {
-                    let version = String::from_utf8_lossy(&output.stdout);
-                    info!(version = %version.trim(), "mmdc (mermaid-cli) found");
-                    // Resolve the full path via `which` for robustness.
-                    which_mmdc().or_else(|| Some(PathBuf::from("mmdc")))
-                }
-                Ok(output) => {
-                    debug!(
-                        status = %output.status,
-                        "mmdc found but returned non-zero"
-                    );
-                    None
-                }
-                Err(_) => {
-                    debug!("mmdc not found on PATH");
-                    None
-                }
+            if let Some(b) = detect_mmdz() {
+                return Some(b);
             }
+            detect_mmdc()
         })
         .is_some()
 }
 
-/// Try to resolve the full path to `mmdc`.
-fn which_mmdc() -> Option<PathBuf> {
+/// Try to find `mmdz`.  Checks `~/bin/mmdz` first, then PATH.
+fn detect_mmdz() -> Option<MermaidBackend> {
+    // Explicit ~/bin/mmdz path.
+    if let Some(home) = std::env::var_os("HOME") {
+        let explicit = PathBuf::from(home).join("bin/mmdz");
+        if let Some(b) = probe_mmdz(&explicit) {
+            return Some(b);
+        }
+    }
+    // Fallback: mmdz on PATH.
+    if let Some(path) = which_cmd("mmdz")
+        && let Some(b) = probe_mmdz(&path)
+    {
+        return Some(b);
+    }
+    None
+}
+
+/// Verify that a given `mmdz` path works by running `<path> version`.
+fn probe_mmdz(path: &Path) -> Option<MermaidBackend> {
+    match Command::new(path).arg("version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            info!(version = %version.trim(), path = %path.display(), "mmdz found");
+            Some(MermaidBackend::Mmdz(path.to_path_buf()))
+        }
+        Ok(output) => {
+            debug!(
+                status = %output.status,
+                path = %path.display(),
+                "mmdz found but returned non-zero"
+            );
+            None
+        }
+        Err(_) => {
+            debug!(path = %path.display(), "mmdz not found");
+            None
+        }
+    }
+}
+
+/// Try to find `mmdc` (Node.js mermaid-cli) on PATH.
+fn detect_mmdc() -> Option<MermaidBackend> {
+    match Command::new("mmdc").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            info!(version = %version.trim(), "mmdc (mermaid-cli) found");
+            let path = which_cmd("mmdc").unwrap_or_else(|| PathBuf::from("mmdc"));
+            Some(MermaidBackend::Mmdc(path))
+        }
+        Ok(output) => {
+            debug!(
+                status = %output.status,
+                "mmdc found but returned non-zero"
+            );
+            None
+        }
+        Err(_) => {
+            debug!("mmdc not found on PATH");
+            None
+        }
+    }
+}
+
+/// Resolve the full path to a command via `which`.
+fn which_cmd(name: &str) -> Option<PathBuf> {
     Command::new("which")
-        .arg("mmdc")
+        .arg(name)
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -74,12 +134,12 @@ fn which_mmdc() -> Option<PathBuf> {
         })
 }
 
-/// Get the cached mmdc path (only valid after `mmdc_available()` returns true).
-fn mmdc_path() -> &'static Path {
-    MMDC_AVAILABLE
+/// Get the cached backend (only valid after `mmdc_available()` returns true).
+fn backend() -> &'static MermaidBackend {
+    BACKEND
         .get()
-        .and_then(|opt| opt.as_deref())
-        .unwrap_or(Path::new("mmdc"))
+        .and_then(|opt| opt.as_ref())
+        .expect("backend() called before mmdc_available()")
 }
 
 // ── Extraction ────────────────────────────────────────────────────
@@ -145,102 +205,143 @@ pub fn extract_mermaid_blocks(markdown: &str) -> Vec<MermaidBlock> {
 
 // ── Rendering ─────────────────────────────────────────────────────
 
-/// Determine the mermaid theme to use based on the reed theme's background
-/// color brightness.
+/// Determine the **mmdc** theme to use based on background brightness.
 ///
 /// Returns `"dark"` for dark backgrounds and `"default"` (light) for light ones.
 pub fn mermaid_theme_for(bg: Color) -> &'static str {
-    match bg {
-        Color::Rgb { r, g, b } => {
-            // Relative luminance approximation.
-            let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
-            if luminance < 128.0 { "dark" } else { "default" }
-        }
-        // Color::Reset means transparent / terminal default — assume dark.
-        // For named colors, also assume dark terminal.
-        _ => "dark",
+    if is_dark_bg(bg) { "dark" } else { "default" }
+}
+
+/// Determine the **mmdz** theme to use based on background brightness.
+///
+/// Returns `"default"` for dark backgrounds and `"default-light"` for
+/// light ones.  mmdz theme names differ from mmdc: the dark variant is
+/// called "default" and the light variant is "default-light".
+fn mmdz_theme_for(bg: Color) -> &'static str {
+    if is_dark_bg(bg) {
+        "default"
+    } else {
+        "default-light"
     }
 }
 
-/// Render a mermaid diagram source to PNG bytes using `mmdc`.
+/// Returns `true` if `bg` should be treated as a dark background.
+fn is_dark_bg(bg: Color) -> bool {
+    match bg {
+        Color::Rgb { r, g, b } => {
+            let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
+            luminance < 128.0
+        }
+        // Color::Reset means transparent / terminal default — assume dark.
+        _ => true,
+    }
+}
+
+/// Convert a crossterm `Color` to a CSS hex string for mmdc's `-b` flag.
 ///
-/// Returns `None` if mmdc is unavailable or rendering fails.
-/// The `bg_color` is used to select the mermaid theme (dark/light).
+/// Returns a `#RRGGBB` string for RGB colors, or `"transparent"` for
+/// `Color::Reset` and other non-RGB variants.
+fn color_to_hex(color: Color) -> String {
+    match color {
+        Color::Rgb { r, g, b } => format!("#{r:02x}{g:02x}{b:02x}"),
+        _ => "transparent".to_string(),
+    }
+}
+
+/// Render a mermaid diagram source to PNG bytes.
+///
+/// Dispatches to the detected backend (`mmdz` or `mmdc`).
+/// Returns `None` if no backend is available or rendering fails.
+/// The `bg_color` is used to select the mermaid theme (dark/light) and,
+/// for mmdc, as the diagram's background color.
 pub fn render_to_png(source: &str, bg_color: Color) -> Option<Vec<u8>> {
     if !mmdc_available() {
         return None;
     }
 
-    let theme = mermaid_theme_for(bg_color);
-
-    // Create temp files for input and output.
+    // Shared temp directory and content-hashed filenames.
+    let bg_hex = color_to_hex(bg_color);
     let tmp_dir = std::env::temp_dir().join("reed-mermaid");
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
         warn!(error = %e, "failed to create mermaid temp directory");
         return None;
     }
-
-    // Use a unique filename based on content hash to avoid collisions.
-    let hash = simple_hash(source);
+    let hash = simple_hash(&format!("{source}{bg_hex}"));
     let input_path = tmp_dir.join(format!("{hash}.mmd"));
     let output_path = tmp_dir.join(format!("{hash}.png"));
 
-    // Write mermaid source to temp file.
     if let Err(e) = write_temp_file(&input_path, source) {
         warn!(error = %e, "failed to write mermaid temp file");
         return None;
     }
 
-    // Run mmdc.
-    let result = Command::new(mmdc_path())
-        .arg("-i")
-        .arg(&input_path)
-        .arg("-o")
-        .arg(&output_path)
-        .arg("-t")
-        .arg(theme)
-        .arg("-b")
-        .arg("transparent")
-        .arg("--scale")
-        .arg("2") // 2x for crisp rendering on high-DPI
-        .arg("-q") // quiet
-        .output();
+    let result = match backend() {
+        MermaidBackend::Mmdz(path) => {
+            let theme = mmdz_theme_for(bg_color);
+            Command::new(path)
+                .arg("render")
+                .arg(&input_path)
+                .arg("-o")
+                .arg(&output_path)
+                .arg("-t")
+                .arg(theme)
+                .output()
+        }
+        MermaidBackend::Mmdc(path) => {
+            let theme = mermaid_theme_for(bg_color);
+            Command::new(path)
+                .arg("-i")
+                .arg(&input_path)
+                .arg("-o")
+                .arg(&output_path)
+                .arg("-t")
+                .arg(theme)
+                .arg("-b")
+                .arg(&bg_hex)
+                .arg("--scale")
+                .arg("2") // 2x for crisp rendering on high-DPI
+                .arg("-q") // quiet
+                .output()
+        }
+    };
 
     // Clean up input file (best-effort).
     let _ = std::fs::remove_file(&input_path);
 
+    let backend_name = match backend() {
+        MermaidBackend::Mmdz(_) => "mmdz",
+        MermaidBackend::Mmdc(_) => "mmdc",
+    };
+
     match result {
-        Ok(output) if output.status.success() => {
-            // Read the generated PNG.
-            match std::fs::read(&output_path) {
-                Ok(png_data) => {
-                    let _ = std::fs::remove_file(&output_path);
-                    debug!(
-                        size = png_data.len(),
-                        theme = theme,
-                        "mermaid diagram rendered"
-                    );
-                    Some(png_data)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to read mmdc output PNG");
-                    let _ = std::fs::remove_file(&output_path);
-                    None
-                }
+        Ok(output) if output.status.success() => match std::fs::read(&output_path) {
+            Ok(png_data) => {
+                let _ = std::fs::remove_file(&output_path);
+                debug!(
+                    size = png_data.len(),
+                    backend = backend_name,
+                    "mermaid diagram rendered"
+                );
+                Some(png_data)
             }
-        }
+            Err(e) => {
+                warn!(error = %e, "failed to read {backend_name} output PNG");
+                let _ = std::fs::remove_file(&output_path);
+                None
+            }
+        },
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!(
                 status = %output.status,
                 stderr = %stderr.trim(),
-                "mmdc failed to render diagram"
+                "{backend_name} failed to render diagram"
             );
             let _ = std::fs::remove_file(&output_path);
             None
         }
         Err(e) => {
-            warn!(error = %e, "failed to execute mmdc");
+            warn!(error = %e, "failed to execute {backend_name}");
             None
         }
     }
@@ -363,7 +464,7 @@ mod tests {
     #[test]
     fn render_to_png_produces_valid_image() {
         if !mmdc_available() {
-            eprintln!("SKIP: mmdc not installed");
+            eprintln!("SKIP: no mermaid backend installed");
             return;
         }
         let source = "graph TD\n    A[Start] --> B[End]";
@@ -385,7 +486,7 @@ mod tests {
     #[test]
     fn render_to_png_dark_and_light_themes() {
         if !mmdc_available() {
-            eprintln!("SKIP: mmdc not installed");
+            eprintln!("SKIP: no mermaid backend installed");
             return;
         }
         let source = "graph LR\n    X --> Y";
@@ -400,11 +501,81 @@ mod tests {
         );
         assert!(dark.is_some(), "dark theme render should succeed");
         assert!(light.is_some(), "light theme render should succeed");
-        // The two renders should produce different images (different themes).
+        // The two renders should produce different images (different themes + bg).
         assert_ne!(
-            dark.as_ref().unwrap().len(),
-            light.as_ref().unwrap().len(),
+            dark.as_ref().unwrap(),
+            light.as_ref().unwrap(),
             "dark and light renders should differ (different themes)"
         );
+    }
+
+    #[test]
+    fn color_to_hex_rgb() {
+        assert_eq!(
+            color_to_hex(Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 46
+            }),
+            "#1e1e2e"
+        );
+        assert_eq!(
+            color_to_hex(Color::Rgb {
+                r: 255,
+                g: 255,
+                b: 255
+            }),
+            "#ffffff"
+        );
+    }
+
+    #[test]
+    fn color_to_hex_reset() {
+        assert_eq!(color_to_hex(Color::Reset), "transparent");
+    }
+
+    #[test]
+    fn mmdz_theme_dark_bg() {
+        assert_eq!(mmdz_theme_for(Color::Rgb { r: 0, g: 0, b: 0 }), "default");
+        assert_eq!(
+            mmdz_theme_for(Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 30
+            }),
+            "default"
+        );
+        assert_eq!(mmdz_theme_for(Color::Reset), "default");
+    }
+
+    #[test]
+    fn mmdz_theme_light_bg() {
+        assert_eq!(
+            mmdz_theme_for(Color::Rgb {
+                r: 255,
+                g: 255,
+                b: 255
+            }),
+            "default-light"
+        );
+    }
+
+    #[test]
+    fn is_dark_bg_consistent_with_themes() {
+        // Dark backgrounds: is_dark_bg=true → mmdc "dark", mmdz "default"
+        let dark = Color::Rgb { r: 0, g: 0, b: 0 };
+        assert!(is_dark_bg(dark));
+        assert_eq!(mermaid_theme_for(dark), "dark");
+        assert_eq!(mmdz_theme_for(dark), "default");
+
+        // Light backgrounds: is_dark_bg=false → mmdc "default", mmdz "default-light"
+        let light = Color::Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        assert!(!is_dark_bg(light));
+        assert_eq!(mermaid_theme_for(light), "default");
+        assert_eq!(mmdz_theme_for(light), "default-light");
     }
 }
