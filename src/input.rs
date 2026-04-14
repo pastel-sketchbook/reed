@@ -191,7 +191,7 @@ pub fn poll<'a>(
                 #[allow(clippy::cast_possible_truncation)]
                 let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
                 if let Some(root) = zmd_root {
-                    match fzf_zmd_picker(root)? {
+                    match fzf_zmd_picker(root, true)? {
                         Some(path) => return Ok(Action::ZmdOpen(path)),
                         None => return Ok(Action::Redraw(scroll_pos)),
                     }
@@ -953,8 +953,15 @@ fn zmd_get_content(zmd_root: &std::path::Path, uri: &str) -> Option<String> {
 /// results in fzf with `zmd context` as a preview, and returns the resolved
 /// file path of the selected document.
 ///
+/// `in_alternate_screen`: true when called from the viewer (alternate screen
+/// is active and must be left/re-entered around fzf); false when called from
+/// the main fzf picker (main screen, no alternate-screen dance needed).
+///
 /// Returns `None` if the user cancelled or no results were found.
-fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+fn fzf_zmd_picker(
+    zmd_root: &std::path::Path,
+    in_alternate_screen: bool,
+) -> Result<Option<std::path::PathBuf>> {
     // Check if fzf is available.
     if Command::new("fzf")
         .arg("--version")
@@ -967,12 +974,21 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
         return Ok(None);
     }
 
+    // Leave the alternate screen so fzf draws on the main screen.
+    // This prevents fzf's /dev/tty writes from corrupting the terminal's
+    // cursor-position tracking inside the alternate buffer.
     let mut stdout = std::io::stdout();
     terminal::disable_raw_mode()?;
-    execute!(stdout, DisableMouseCapture)?;
-    let (_, term_rows) = terminal::size().unwrap_or((80, 24));
-    let center_row = term_rows * 30 / 100;
-    execute!(stdout, cursor::MoveTo(0, center_row), cursor::Show)?;
+    if in_alternate_screen {
+        execute!(
+            stdout,
+            DisableMouseCapture,
+            terminal::LeaveAlternateScreen,
+            cursor::Show
+        )?;
+    } else {
+        execute!(stdout, DisableMouseCapture, cursor::Show)?;
+    }
 
     let result = (|| -> Result<Option<std::path::PathBuf>> {
         // Resolve our own binary for the reload command (same pattern as
@@ -1120,14 +1136,18 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
         Ok(None)
     })();
 
-    // Restore terminal state.
-    execute!(
-        stdout,
-        cursor::Hide,
-        terminal::Clear(terminal::ClearType::All),
-        EnableMouseCapture
-    )?;
-    terminal::enable_raw_mode()?;
+    // Re-enter alternate screen (if we left it) and restore viewer state.
+    // When called from the main fzf picker (no alternate screen), no terminal
+    // state restoration is needed — fzf and the viewer manage their own state.
+    if in_alternate_screen {
+        execute!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            EnableMouseCapture
+        )?;
+        terminal::enable_raw_mode()?;
+    }
 
     result
 }
@@ -1143,10 +1163,10 @@ fn shell_escape_str(s: &str) -> String {
 
 /// Launch a zmd search picker (public entry point for the fzf picker mode).
 ///
-/// Wraps `fzf_zmd_picker` — the terminal state dance (disable raw mode,
-/// re-enable after) is handled inside.
+/// Called from the main fzf picker (no alternate screen active).
+/// The terminal state dance (disable raw mode, re-enable after) is handled inside.
 pub fn zmd_search_pick(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
-    fzf_zmd_picker(zmd_root)
+    fzf_zmd_picker(zmd_root, false)
 }
 
 #[cfg(test)]
