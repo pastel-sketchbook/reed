@@ -27,6 +27,13 @@ entirely and use syntect for direct syntax highlighting.
 - **Binary file viewing** -- binary files open in `hexyl` when installed
 - **Document viewing** -- Office files (docx, pptx, xlsx, odt, rtf, epub)
   converted to markdown via `pandoc` and rendered in the built-in viewer
+- **zmd integration** -- when [zmd](https://github.com/pastel-sketchbook/zig-qmd) is
+  installed and a `.qmd/data.db` index exists, press `S` in the viewer or
+  `Ctrl-s` in the fzf picker to open a hybrid search overlay over your
+  markdown notes. Defaults to FTS (precise keyword matching); press `Ctrl-t`
+  inside the overlay to toggle semantic/hybrid mode. Search terms are
+  highlighted in the preview pane. zmd is fully optional -- reed works
+  exactly the same without it
 - **Vendor filter** -- toggle vendor/generated directories (`node_modules`,
   `target`, `.git`, etc.) in the fzf picker with `Ctrl-v` (requires `fd`)
 - **Scrollback navigation** -- PgUp/PgDn, Home/End, arrow keys, `j`/`k`,
@@ -103,6 +110,7 @@ reed --line 42 <file>    # start at line 42
 | `t` / `T` | Next / previous theme |
 | `z` | Toggle zen mode (fullscreen, no chrome) |
 | `F` | Toggle follow/tail mode |
+| `S` | zmd search (if available) |
 | `Ctrl-n` / `Ctrl-p` | Next / previous buffer |
 | `?` | Show keybinding help |
 
@@ -115,6 +123,7 @@ reed --line 42 <file>    # start at line 42
 | `Ctrl-n` | Next theme |
 | `Ctrl-b` | Previous theme |
 | `Ctrl-v` | Toggle vendor file filter (requires `fd`) |
+| `Ctrl-s` | zmd search overlay (if available) |
 
 ## Themes
 
@@ -141,7 +150,7 @@ src/
 
 ```sh
 cargo build      # compile (requires Zig 0.15.x)
-cargo test       # run 134 unit tests
+cargo test       # run 143 unit tests
 cargo clippy     # lint
 cargo fmt        # format
 ```
