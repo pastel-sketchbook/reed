@@ -401,15 +401,20 @@ fn highlight_ansi_line(line: &str, terms: &[String]) -> String {
     }
 
     // Find all match ranges on the visible text (case-insensitive).
+    // We need char-based indices (not byte offsets) because `vis_idx` in the
+    // rebuild loop below is incremented per visible *character*.
     let visible_lower = visible.to_lowercase();
-    let mut match_ranges: Vec<(usize, usize)> = Vec::new(); // (start, end) in visible indices
+    let mut match_ranges: Vec<(usize, usize)> = Vec::new(); // (start, end) in visible char indices
     for term in terms {
-        let mut search_from = 0;
-        while let Some(pos) = visible_lower[search_from..].find(term.as_str()) {
-            let start = search_from + pos;
-            let end = start + term.len();
-            match_ranges.push((start, end));
-            search_from = end;
+        let mut byte_from: usize = 0;
+        while let Some(byte_pos) = visible_lower[byte_from..].find(term.as_str()) {
+            let byte_start = byte_from + byte_pos;
+            let byte_end = byte_start + term.len();
+            // Convert byte offsets to char indices for CJK-safe matching.
+            let char_start = visible_lower[..byte_start].chars().count();
+            let char_end = char_start + visible_lower[byte_start..byte_end].chars().count();
+            match_ranges.push((char_start, char_end));
+            byte_from = byte_end;
         }
     }
 
@@ -3467,6 +3472,72 @@ End.\n";
     #[test]
     fn css_color_reset() {
         assert_eq!(css_color(Color::Reset), "inherit");
+    }
+
+    // ── highlight_ansi_line tests ──────────────────────────────────
+
+    #[test]
+    fn highlight_ansi_line_ascii() {
+        let line = "hello world";
+        let terms = vec!["hello".to_string()];
+        let result = highlight_ansi_line(line, &terms);
+        assert!(result.contains("\x1b[1;7m"), "should contain HL_ON");
+        assert!(result.contains("hello"), "should contain the term");
+        assert!(result.contains("\x1b[27;22m"), "should contain HL_OFF");
+    }
+
+    #[test]
+    fn highlight_ansi_line_cjk() {
+        // Korean: "주택임대차보호법에 의한 보증금 반환"
+        // Search for "보호법"
+        let line = "주택임대차보호법에 의한 보증금 반환";
+        let terms = vec!["보호법".to_string()];
+        let result = highlight_ansi_line(line, &terms);
+        // Must contain the highlight markers.
+        assert!(
+            result.contains("\x1b[1;7m"),
+            "CJK highlight should contain HL_ON: {result}"
+        );
+        assert!(
+            result.contains("\x1b[27;22m"),
+            "CJK highlight should contain HL_OFF: {result}"
+        );
+        // The highlighted portion must be exactly "보호법" (3 chars).
+        let hl_start = result.find("\x1b[1;7m").unwrap() + "\x1b[1;7m".len();
+        let hl_end = result.find("\x1b[27;22m").unwrap();
+        let highlighted_text = &result[hl_start..hl_end];
+        assert_eq!(
+            highlighted_text, "보호법",
+            "should highlight exactly the CJK term"
+        );
+    }
+
+    #[test]
+    fn highlight_ansi_line_cjk_with_ansi() {
+        // Simulate ANSI-colored text with Korean content.
+        let line = "\x1b[38;2;200;200;200m주택임대차보호법\x1b[0m 보증금";
+        let terms = vec!["보호법".to_string()];
+        let result = highlight_ansi_line(line, &terms);
+        assert!(
+            result.contains("\x1b[1;7m"),
+            "should highlight CJK term even within ANSI sequences: {result}"
+        );
+    }
+
+    #[test]
+    fn highlight_ansi_line_empty_terms() {
+        let line = "주택임대차보호법에 의한 보증금 반환";
+        let terms: Vec<String> = vec![];
+        let result = highlight_ansi_line(line, &terms);
+        assert_eq!(result, line, "empty terms should return line unchanged");
+    }
+
+    #[test]
+    fn highlight_ansi_line_no_match() {
+        let line = "주택임대차보호법에 의한 보증금 반환";
+        let terms = vec!["없는단어".to_string()];
+        let result = highlight_ansi_line(line, &terms);
+        assert_eq!(result, line, "no match should return line unchanged");
     }
 
     /// Verify that placeholder lines (marker + ZWSP filler) survive the
