@@ -975,7 +975,7 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
 
         // Preview command: use zmd get for the highlighted item.
         let context_cmd = format!(
-            r#"cd {zmd_root_escaped} && zmd get "zmd://{{1}}" 2>/dev/null || echo "No preview available""#,
+            r#"cd {zmd_root_escaped} && zmd get zmd://{{1}} 2>/dev/null || echo "No preview available""#,
             zmd_root_escaped = shell_escape_str(&zmd_root_str)
         );
 
