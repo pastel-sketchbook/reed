@@ -685,11 +685,9 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             } else {
                 continue;
             }
+        } else if selected.is_empty() {
+            return Ok(());
         } else {
-            if selected.is_empty() {
-                return Ok(());
-            }
-
             let file = PathBuf::from(&selected);
 
             // Add to buffer ring (avoid duplicates at the end).

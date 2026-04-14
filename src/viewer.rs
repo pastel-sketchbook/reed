@@ -414,6 +414,9 @@ enum LoopExit {
     /// Open a file from zmd semantic search.
     ZmdOpen(std::path::PathBuf),
 }
+
+/// What caused the viewer to exit — returned to the caller so it can
+/// decide whether to quit entirely or switch buffers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewerExit {
     /// User pressed `q` / `Esc` — exit the application.
@@ -677,6 +680,9 @@ pub fn run(
     let theme_name = config::resolve_theme_name(initial_theme, &prefs);
     let mut theme_index = theme::theme_index_by_name(theme_name);
 
+    // Detect zmd availability once per viewer session.
+    let zmd_root = input::detect_zmd_root();
+
     // Enter raw mode / alternate screen.
     terminal::enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
@@ -886,6 +892,7 @@ pub fn run(
                 h_offset,
                 follow_mode,
                 cell_h,
+                zmd_root.as_deref(),
             )? {
                 LoopExit::Quit => break,
                 LoopExit::BufferNext => {
@@ -1335,6 +1342,7 @@ fn run_inner_loop<'a>(
     h_offset: usize,
     follow_mode: bool,
     cell_h: u16,
+    zmd_root: Option<&Path>,
 ) -> Result<LoopExit> {
     let mut frame_count: u32 = 0;
     loop {
@@ -1625,7 +1633,7 @@ fn run_inner_loop<'a>(
             }
         }
 
-        match input::poll(term, render_state, content_rows, headings)? {
+        match input::poll(term, render_state, content_rows, headings, zmd_root)? {
             input::Action::Continue => {}
             input::Action::Quit => return Ok(LoopExit::Quit),
             input::Action::NextTheme => return Ok(LoopExit::NextTheme),

@@ -112,6 +112,7 @@ pub fn poll<'a>(
     _render: &mut RenderState<'a>,
     content_rows: u16,
     headings: &[Heading],
+    zmd_root: Option<&std::path::Path>,
 ) -> Result<Action> {
     if !event::poll(Duration::from_millis(16))? {
         return Ok(Action::Continue);
@@ -187,8 +188,8 @@ pub fn poll<'a>(
             (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
                 #[allow(clippy::cast_possible_truncation)]
                 let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
-                if let Some(zmd_root) = detect_zmd_root() {
-                    match fzf_zmd_picker(&zmd_root)? {
+                if let Some(root) = zmd_root {
+                    match fzf_zmd_picker(root)? {
                         Some(path) => return Ok(Action::ZmdOpen(path)),
                         None => return Ok(Action::Redraw(scroll_pos)),
                     }
@@ -883,39 +884,48 @@ struct ZmdResult {
 
 /// Resolve a zmd search result to a physical file path.
 ///
-/// Runs `zmd collection list` from `zmd_root` to map collection names to
-/// their local paths, then joins with the document path.
-fn resolve_zmd_path(zmd_root: &std::path::Path, result: &ZmdResult) -> Option<std::path::PathBuf> {
-    let output = Command::new("zmd")
+/// Runs `zmd collection list` from `zmd_root` and returns a map of
+/// collection name → local directory path.
+fn load_zmd_collections(
+    zmd_root: &std::path::Path,
+) -> std::collections::HashMap<String, std::path::PathBuf> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(output) = Command::new("zmd")
         .arg("collection")
         .arg("list")
         .current_dir(zmd_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .ok()?;
+    else {
+        return map;
+    };
     let list = String::from_utf8_lossy(&output.stdout);
     // Each line: "  name: path" (with leading whitespace).
     for line in list.lines() {
         let line = line.trim();
         if let Some((name, coll_path)) = line.split_once(':') {
-            let name = name.trim();
-            let coll_path = coll_path.trim();
-            if name == result.collection {
-                let full = zmd_root.join(coll_path).join(&result.path);
-                if full.exists() {
-                    return Some(full);
-                }
-            }
+            map.insert(name.trim().to_string(), zmd_root.join(coll_path.trim()));
         }
     }
-    None
+    map
+}
+
+/// Resolve a zmd search result to a physical file path using a
+/// pre-loaded collection map.
+fn resolve_zmd_path(
+    collections: &std::collections::HashMap<String, std::path::PathBuf>,
+    result: &ZmdResult,
+) -> Option<std::path::PathBuf> {
+    let coll_dir = collections.get(&result.collection)?;
+    let full = coll_dir.join(&result.path);
+    if full.exists() { Some(full) } else { None }
 }
 
 /// Fetch document content via `zmd get` for a `zmd://` URI.
 ///
 /// Returns the markdown content string, or `None` if the command fails.
-pub fn zmd_get_content(zmd_root: &std::path::Path, uri: &str) -> Option<String> {
+fn zmd_get_content(zmd_root: &std::path::Path, uri: &str) -> Option<String> {
     let output = Command::new("zmd")
         .arg("get")
         .arg(uri)
@@ -973,9 +983,11 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
         // outputs tab-separated lines (collection/path \t title).
         let reload_cmd = format!("{reed_escaped} --zmd-reload {{q}}");
 
-        // Preview command: use zmd get for the highlighted item.
+        // Preview command: pipe zmd get through reed --preview for rendered markdown
+        // (including mermaid diagrams and images, just like the main fzf picker).
+        // Write to a temp file to avoid command-substitution issues with large docs.
         let context_cmd = format!(
-            r#"cd {zmd_root_escaped} && zmd get zmd://{{1}} 2>/dev/null || echo "No preview available""#,
+            r#"cd {zmd_root_escaped} && zmd get zmd://{{1}} > /tmp/reed-zmd-preview.md 2>/dev/null && [ -s /tmp/reed-zmd-preview.md ] && {reed_escaped} --preview /tmp/reed-zmd-preview.md"#,
             zmd_root_escaped = shell_escape_str(&zmd_root_str)
         );
 
@@ -992,7 +1004,7 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
             .arg("--preview")
             .arg(&context_cmd)
             .arg("--preview-window")
-            .arg("right:50%:wrap")
+            .arg("right:64%")
             .arg("--height")
             .arg("100%")
             .arg("--layout")
@@ -1041,8 +1053,9 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
                 collection: collection.to_string(),
                 path: doc_path.to_string(),
             };
-            // Try resolving to a physical file first.
-            if let Some(physical) = resolve_zmd_path(zmd_root, &result) {
+            // Load collection map once, resolve to physical file.
+            let collections = load_zmd_collections(zmd_root);
+            if let Some(physical) = resolve_zmd_path(&collections, &result) {
                 return Ok(Some(physical));
             }
             // Fallback: fetch content via `zmd get` and write to a temp file.
