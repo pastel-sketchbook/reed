@@ -11,6 +11,8 @@ use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal};
 use tracing::debug;
 
+use crate::viewer;
+
 /// Result of processing one input cycle.
 pub enum Action {
     Continue,
@@ -1026,6 +1028,10 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
             reload_sem = reload_sem,
         );
 
+        // Themed border label at the top-right corner (same position as the
+        // main fzf picker's theme name label).
+        let zmd_label = viewer::fzf_zmd_border_label();
+
         let mut child = Command::new("fzf")
             .arg("--ansi")
             .arg("--no-multi")
@@ -1049,7 +1055,9 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
             .arg("--border")
             .arg("rounded")
             .arg("--border-label")
-            .arg(" zmd Search ")
+            .arg(&zmd_label)
+            .arg("--border-label-pos")
+            .arg("-2")
             .arg("--color")
             .arg("bg:-1")
             .arg("--bind")

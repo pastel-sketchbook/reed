@@ -90,6 +90,16 @@ pub fn fzf_border_label(theme: &Theme) -> String {
     )
 }
 
+/// Build the ANSI-styled border label for the zmd search fzf overlay.
+/// Uses the theme's accent color, positioned at top-right via `--border-label-pos`.
+pub fn fzf_zmd_border_label() -> String {
+    let prefs = config::load_preferences();
+    let name = config::resolve_theme_name(None, &prefs);
+    let theme = &theme::ALL_THEMES[theme::theme_index_by_name(name)];
+    let accent = ansi_fg(theme.accent);
+    format!("{accent}{ANSI_BOLD} [zmd Search] {ANSI_RESET}")
+}
+
 /// Check whether the terminal likely supports the Kitty graphics protocol.
 ///
 /// Returns `GraphicsProtocol::None` for terminals known not to support
