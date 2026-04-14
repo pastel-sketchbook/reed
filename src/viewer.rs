@@ -92,12 +92,17 @@ pub fn fzf_border_label(theme: &Theme) -> String {
 
 /// Build the ANSI-styled border label for the zmd search fzf overlay.
 /// Uses the theme's accent color, positioned at top-right via `--border-label-pos`.
+///
+/// NOTE: we intentionally omit a trailing `\x1b[0m` reset.  fzf handles the
+/// color lifecycle for border-label text internally; an explicit SGR-0 can
+/// leak through to the host terminal when fzf redraws/exits, causing the
+/// shell prompt to become misaligned.
 pub fn fzf_zmd_border_label() -> String {
     let prefs = config::load_preferences();
     let name = config::resolve_theme_name(None, &prefs);
     let theme = &theme::ALL_THEMES[theme::theme_index_by_name(name)];
     let accent = ansi_fg(theme.accent);
-    format!("{accent}{ANSI_BOLD} [zmd Search] {ANSI_RESET}")
+    format!("{accent}{ANSI_BOLD} [zmd Search] ")
 }
 
 /// Check whether the terminal likely supports the Kitty graphics protocol.
@@ -1257,6 +1262,10 @@ pub fn run(
         cursor::Show
     );
     let _ = terminal::disable_raw_mode();
+    // Reset SGR so no stale ANSI attributes (bold, reverse, color) leak
+    // into the shell prompt after reed exits.
+    let _ = stdout.write_all(b"\x1b[0m");
+    let _ = stdout.flush();
 
     result
 }
