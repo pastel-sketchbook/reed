@@ -55,6 +55,8 @@ pub enum Action {
     JumpToMark(char),
     /// Export the current document to HTML.
     ExportHtml,
+    /// Open a file selected via zmd semantic search (user pressed `S`).
+    ZmdOpen(std::path::PathBuf),
 }
 
 /// A heading extracted from the markdown source.
@@ -178,6 +180,18 @@ pub fn poll<'a>(
                 match fzf_heading_picker(headings)? {
                     Some(line) => return Ok(Action::GotoLine(line)),
                     None => return Ok(Action::Redraw(scroll_pos)),
+                }
+            }
+
+            // zmd semantic search (S = search notes) — only when zmd index is available
+            (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                if let Some(zmd_root) = detect_zmd_root() {
+                    match fzf_zmd_picker(&zmd_root)? {
+                        Some(path) => return Ok(Action::ZmdOpen(path)),
+                        None => return Ok(Action::Redraw(scroll_pos)),
+                    }
                 }
             }
 
@@ -826,6 +840,253 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── zmd integration (optional — only active when zmd is installed) ───
+
+/// Walk the current directory and its ancestors looking for `.qmd/data.db`.
+/// Returns the directory containing `.qmd/` if found.
+///
+/// This is the same discovery logic zmd itself uses: the index lives in the
+/// project root alongside the markdown collections.
+pub fn detect_zmd_root() -> Option<std::path::PathBuf> {
+    // Quick bail: is `zmd` even on PATH?
+    if !Command::new("zmd")
+        .arg("version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join(".qmd").join("data.db").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// A zmd search result used for path resolution.
+#[derive(Debug, Clone)]
+struct ZmdResult {
+    collection: String,
+    path: String,
+}
+
+/// Resolve a zmd search result to a physical file path.
+///
+/// Runs `zmd collection list` from `zmd_root` to map collection names to
+/// their local paths, then joins with the document path.
+fn resolve_zmd_path(zmd_root: &std::path::Path, result: &ZmdResult) -> Option<std::path::PathBuf> {
+    let output = Command::new("zmd")
+        .arg("collection")
+        .arg("list")
+        .current_dir(zmd_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let list = String::from_utf8_lossy(&output.stdout);
+    // Each line: "  name: path" (with leading whitespace).
+    for line in list.lines() {
+        let line = line.trim();
+        if let Some((name, coll_path)) = line.split_once(':') {
+            let name = name.trim();
+            let coll_path = coll_path.trim();
+            if name == result.collection {
+                let full = zmd_root.join(coll_path).join(&result.path);
+                if full.exists() {
+                    return Some(full);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Fetch document content via `zmd get` for a `zmd://` URI.
+///
+/// Returns the markdown content string, or `None` if the command fails.
+pub fn zmd_get_content(zmd_root: &std::path::Path, uri: &str) -> Option<String> {
+    let output = Command::new("zmd")
+        .arg("get")
+        .arg(uri)
+        .current_dir(zmd_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let content = String::from_utf8_lossy(&output.stdout).into_owned();
+    if content.is_empty() {
+        None
+    } else {
+        Some(content)
+    }
+}
+
+/// Launch an fzf picker over zmd search results.
+///
+/// Prompts the user for a search query, runs `zmd query --json`, presents
+/// results in fzf with `zmd context` as a preview, and returns the resolved
+/// file path of the selected document.
+///
+/// Returns `None` if the user cancelled or no results were found.
+fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+    // Check if fzf is available.
+    if Command::new("fzf")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
+        debug!("fzf not found on PATH");
+        return Ok(None);
+    }
+
+    let mut stdout = std::io::stdout();
+    terminal::disable_raw_mode()?;
+    execute!(stdout, DisableMouseCapture)?;
+    let (_, term_rows) = terminal::size().unwrap_or((80, 24));
+    let center_row = term_rows * 30 / 100;
+    execute!(stdout, cursor::MoveTo(0, center_row), cursor::Show)?;
+
+    let result = (|| -> Result<Option<std::path::PathBuf>> {
+        // Resolve our own binary for the reload command (same pattern as
+        // the main fzf picker's preview/header/label commands).
+        let reed_bin = std::env::current_exe().context("cannot determine reed binary path")?;
+        let reed_escaped = shell_escape_str(&reed_bin.display().to_string());
+        let zmd_root_str = zmd_root.display().to_string();
+
+        // The reload command: reed itself parses zmd query JSON and
+        // outputs tab-separated lines (collection/path \t title).
+        let reload_cmd = format!("{reed_escaped} --zmd-reload {{q}}");
+
+        // Preview command: use zmd get for the highlighted item.
+        let context_cmd = format!(
+            r#"cd {zmd_root_escaped} && zmd get "zmd://{{1}}" 2>/dev/null || echo "No preview available""#,
+            zmd_root_escaped = shell_escape_str(&zmd_root_str)
+        );
+
+        let mut child = Command::new("fzf")
+            .arg("--ansi")
+            .arg("--no-multi")
+            .arg("--disabled") // disable fzf's built-in filter; we do our own via reload
+            .arg("--prompt")
+            .arg("zmd> ")
+            .arg("--delimiter")
+            .arg("\t")
+            .arg("--with-nth")
+            .arg("2..") // display title only
+            .arg("--preview")
+            .arg(&context_cmd)
+            .arg("--preview-window")
+            .arg("right:50%:wrap")
+            .arg("--height")
+            .arg("100%")
+            .arg("--layout")
+            .arg("reverse")
+            .arg("--border")
+            .arg("rounded")
+            .arg("--border-label")
+            .arg(" zmd Search ")
+            .arg("--color")
+            .arg("bg:-1")
+            .arg("--bind")
+            .arg(format!("change:reload:{reload_cmd}"))
+            .arg("--bind")
+            .arg("start:reload:true") // start empty, type to search
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .context("failed to launch fzf for zmd search")?;
+
+        // Start with empty stdin (results come from reload).
+        if let Some(stdin) = child.stdin.take() {
+            drop(stdin); // EOF immediately
+        }
+
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Ok(None); // user cancelled
+        }
+
+        // Parse selected line: "collection/path\ttitle"
+        let selected = String::from_utf8_lossy(&output.stdout);
+        let selected = selected.trim();
+        if selected.is_empty() {
+            return Ok(None);
+        }
+
+        let zmd_ref = selected.split('\t').next().unwrap_or("");
+        if zmd_ref.is_empty() {
+            return Ok(None);
+        }
+
+        // Split "collection/path" into collection name and document path.
+        if let Some((collection, doc_path)) = zmd_ref.split_once('/') {
+            let result = ZmdResult {
+                collection: collection.to_string(),
+                path: doc_path.to_string(),
+            };
+            // Try resolving to a physical file first.
+            if let Some(physical) = resolve_zmd_path(zmd_root, &result) {
+                return Ok(Some(physical));
+            }
+            // Fallback: fetch content via `zmd get` and write to a temp file.
+            let uri = format!("zmd://{zmd_ref}");
+            if let Some(content) = zmd_get_content(zmd_root, &uri) {
+                let tmp_dir = std::env::temp_dir();
+                let safe_name = doc_path.replace('/', "_");
+                let tmp_path = tmp_dir.join(format!("reed-zmd-{safe_name}"));
+                std::fs::write(&tmp_path, &content)
+                    .context("failed to write zmd content to temp file")?;
+                return Ok(Some(tmp_path));
+            }
+        }
+
+        Ok(None)
+    })();
+
+    // Restore terminal state.
+    execute!(
+        stdout,
+        cursor::Hide,
+        terminal::Clear(terminal::ClearType::All),
+        EnableMouseCapture
+    )?;
+    terminal::enable_raw_mode()?;
+
+    result
+}
+
+/// Escape a string for safe embedding in a shell command.
+fn shell_escape_str(s: &str) -> String {
+    if s.contains(' ') || s.contains('\'') || s.contains('"') || s.contains('\\') {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Launch a zmd search picker (public entry point for the fzf picker mode).
+///
+/// Wraps `fzf_zmd_picker` — the terminal state dance (disable raw mode,
+/// re-enable after) is handled inside.
+pub fn zmd_search_pick(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+    fzf_zmd_picker(zmd_root)
 }
 
 #[cfg(test)]

@@ -62,15 +62,21 @@ fn ansi_fg(color: Color) -> String {
 
 /// Build the ANSI-styled header line for the `fzf` picker, showing keyboard
 /// shortcuts and the current theme name. Used by `--header` / `transform-header`.
-pub fn fzf_header_line(theme: &Theme) -> String {
+pub fn fzf_header_line(theme: &Theme, zmd_available: bool) -> String {
     let fg = ansi_fg(theme.fg);
     let accent = ansi_fg(theme.accent);
-    format!(
+    let mut header = format!(
         "{accent}{ANSI_BOLD}^n/^b{ANSI_NORMAL} {fg}Theme  \
          {accent}{ANSI_BOLD}^/{ANSI_NORMAL} {fg}Layout  \
          {accent}{ANSI_BOLD}^v{ANSI_NORMAL} {fg}Vendor  \
          {accent}{ANSI_BOLD}enter{ANSI_NORMAL} {fg}Open{ANSI_RESET}",
-    )
+    );
+    if zmd_available {
+        header.push_str(&format!(
+            "\n{accent}{ANSI_BOLD}^s{ANSI_NORMAL} {fg}zmd Search{ANSI_RESET}"
+        ));
+    }
+    header
 }
 
 /// Build the ANSI-styled border label showing the current theme name.
@@ -405,11 +411,10 @@ enum LoopExit {
     JumpToMark(char),
     /// Export the current document to HTML.
     ExportHtml,
+    /// Open a file from zmd semantic search.
+    ZmdOpen(std::path::PathBuf),
 }
-
-/// What caused the viewer to exit — returned to the caller so it can
-/// decide whether to quit entirely or switch buffers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewerExit {
     /// User pressed `q` / `Esc` — exit the application.
     Quit,
@@ -417,6 +422,8 @@ pub enum ViewerExit {
     BufferNext,
     /// Switch to the previous buffer in the ring (`Ctrl-p`).
     BufferPrev,
+    /// Open a file from zmd semantic search (`S`).
+    ZmdOpen(std::path::PathBuf),
 }
 
 /// Map byte offsets to display-width column positions for a plain-text string.
@@ -1064,6 +1071,10 @@ pub fn run(
                     }
                     goto_line = Some(scroll_pos + 1);
                 }
+                LoopExit::ZmdOpen(path) => {
+                    viewer_exit = ViewerExit::ZmdOpen(path);
+                    break;
+                }
             }
         }
 
@@ -1640,6 +1651,7 @@ fn run_inner_loop<'a>(
             input::Action::SetMark(ch) => return Ok(LoopExit::SetMark(ch)),
             input::Action::JumpToMark(ch) => return Ok(LoopExit::JumpToMark(ch)),
             input::Action::ExportHtml => return Ok(LoopExit::ExportHtml),
+            input::Action::ZmdOpen(path) => return Ok(LoopExit::ZmdOpen(path)),
         }
     }
 }
@@ -2134,6 +2146,7 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
     ("m + a-z", "Set bookmark"),
     ("' + a-z", "Jump to bookmark"),
     ("e", "Export to HTML"),
+    ("S", "zmd search (if available)"),
     ("", ""),
     ("t / T", "Next / previous theme"),
     ("z", "Toggle zen mode"),

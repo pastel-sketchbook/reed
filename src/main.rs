@@ -75,6 +75,11 @@ struct Cli {
     /// Used internally by fzf transform-border-label on theme change.
     #[arg(long)]
     print_label: bool,
+
+    /// Run a zmd query and print tab-separated results for fzf consumption.
+    /// Used internally by the fzf picker's change:reload binding.
+    #[arg(long, hide = true)]
+    zmd_reload: Option<String>,
 }
 
 #[expect(clippy::too_many_lines)]
@@ -85,7 +90,8 @@ fn main() -> Result<()> {
     // of the preview command and displays them in the preview pane.  Force
     // tracing off so log messages don't pollute the rendered preview —
     // regardless of RUST_LOG.
-    let fzf_output_mode = cli.preview || cli.print_header || cli.print_label;
+    let fzf_output_mode =
+        cli.preview || cli.print_header || cli.print_label || cli.zmd_reload.is_some();
     tracing_subscriber::fmt()
         .with_env_filter(if fzf_output_mode {
             tracing_subscriber::EnvFilter::new("off")
@@ -104,7 +110,8 @@ fn main() -> Result<()> {
     if cli.print_header {
         let prefs = config::load_preferences();
         let theme = &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
-        print!("{}", viewer::fzf_header_line(theme));
+        let zmd = input::detect_zmd_root().is_some();
+        print!("{}", viewer::fzf_header_line(theme, zmd));
         return Ok(());
     }
 
@@ -114,6 +121,12 @@ fn main() -> Result<()> {
         let theme = &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         print!("{}", viewer::fzf_border_label(theme));
         return Ok(());
+    }
+
+    // zmd reload: run `zmd query`, parse JSON, print tab-separated lines for fzf.
+    // Used internally by the fzf picker's change:reload binding.
+    if let Some(query) = cli.zmd_reload {
+        return zmd_reload(&query);
     }
 
     // No file argument → launch fzf picker mode.
@@ -264,18 +277,47 @@ fn main() -> Result<()> {
             )
         }
     } else {
-        viewer::run(
-            &raw_content,
-            cli.max_scrollback,
-            cli.theme.as_deref(),
-            &filename,
-            &base_dir,
-            cli.line,
-            code_lang.as_deref(),
-            Some(file.as_path()),
-            None, // No buffer ring in single-file mode.
-        )
-        .map(|_| ()) // Single file — ignore BufferNext/BufferPrev.
+        // Interactive viewer — loop to support zmd search navigation.
+        let mut current_file = file.clone();
+        let mut current_content = raw_content;
+        let mut current_code_lang = code_lang;
+        let mut current_base_dir = base_dir;
+        let mut current_filename = filename;
+
+        loop {
+            let exit = viewer::run(
+                &current_content,
+                cli.max_scrollback,
+                cli.theme.as_deref(),
+                &current_filename,
+                &current_base_dir,
+                cli.line,
+                current_code_lang.as_deref(),
+                Some(current_file.as_path()),
+                None,
+            )?;
+            match exit {
+                viewer::ViewerExit::ZmdOpen(path) => {
+                    current_content = std::fs::read_to_string(&path)
+                        .with_context(|| format!("failed to read {}", path.display()))?;
+                    let is_md = highlight::is_markdown_path(&path);
+                    current_code_lang = if is_md {
+                        None
+                    } else {
+                        highlight::lang_for_path(&path)
+                    };
+                    current_filename = path.display().to_string();
+                    current_base_dir = path
+                        .canonicalize()
+                        .unwrap_or_else(|_| path.clone())
+                        .parent()
+                        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+                    current_file = path;
+                }
+                _ => break, // Quit, BufferNext, BufferPrev — all exit in single-file mode.
+            }
+        }
+        Ok(())
     }
 }
 
@@ -294,6 +336,70 @@ fn cycle_theme(forward: bool) -> Result<()> {
     config::set_active_theme(&mut prefs, theme::ALL_THEMES[next].name);
     config::save_preferences(&prefs).context("failed to save theme preference")?;
     Ok(())
+}
+
+// ── zmd reload (for fzf change:reload) ──────────────────────────
+
+/// Run `zmd query <query> --json`, parse the JSON output, and print
+/// tab-separated lines to stdout for fzf consumption.
+///
+/// Each output line: `collection/path\ttitle`
+///
+/// Used internally by the fzf picker's `change:reload` binding so that
+/// all JSON parsing stays in Rust (no sed/python dependency).
+fn zmd_reload(query: &str) -> Result<()> {
+    use std::io::Write;
+
+    if query.is_empty() {
+        return Ok(());
+    }
+
+    let Some(zmd_root) = input::detect_zmd_root() else {
+        return Ok(());
+    };
+
+    let output = Command::new("zmd")
+        .arg("query")
+        .arg(query)
+        .arg("--json")
+        .current_dir(&zmd_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .context("failed to run zmd query")?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let mut stdout = std::io::stdout().lock();
+
+    // Each non-bracket line is a JSON object.  Extract collection, path,
+    // and title with simple string matching (no serde dependency).
+    for line in json_str.lines() {
+        let line = line.trim().trim_end_matches(',');
+        if !line.starts_with('{') {
+            continue;
+        }
+        let collection = extract_json_str(line, "collection");
+        let path = extract_json_str(line, "path");
+        let title = extract_json_str(line, "title");
+        if let (Some(c), Some(p), Some(t)) = (collection, path, title) {
+            let _ = writeln!(stdout, "{c}/{p}\t{t}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract a JSON string value for a given key from a single-line JSON object.
+fn extract_json_str<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
 
 // ── Stdin viewing ───────────────────────────────────────────────
@@ -468,13 +574,17 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     #[allow(unused_assignments)]
     let mut buffer_index: usize = 0;
 
+    // Detect zmd availability once (check `zmd` on PATH + `.qmd/data.db` in cwd or ancestors).
+    let zmd_root = input::detect_zmd_root();
+    let zmd_available = zmd_root.is_some();
+
     loop {
         // Build the initial header from current preferences (may have changed
         // via theme cycling in the previous iteration).
         let prefs = config::load_preferences();
         let initial_theme =
             &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
-        let initial_header = viewer::fzf_header_line(initial_theme);
+        let initial_header = viewer::fzf_header_line(initial_theme, zmd_available);
         let initial_label = viewer::fzf_border_label(initial_theme);
 
         let mut fzf = Command::new("fzf");
@@ -516,6 +626,12 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             fzf.stdin(std::process::Stdio::piped());
         }
 
+        // When zmd is available, register ctrl-s as an expected key so fzf
+        // exits and reed can take over the terminal for the zmd search overlay.
+        if zmd_available {
+            fzf.arg("--expect").arg("ctrl-s");
+        }
+
         // fzf needs the real TTY for its UI, and writes the selection to stdout.
         let mut child = fzf
             .stdout(std::process::Stdio::piped())
@@ -539,18 +655,49 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             return Ok(());
         }
 
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if selected.is_empty() {
-            return Ok(());
-        }
+        let raw_output = String::from_utf8_lossy(&output.stdout);
 
-        let file = PathBuf::from(&selected);
+        // When --expect is used, fzf outputs two lines:
+        //   line 1: the key pressed (empty if enter, "ctrl-s" if ctrl-s)
+        //   line 2: the selected item
+        // Without --expect, it's a single line with the selection.
+        let (pressed_key, selected) = if zmd_available {
+            let mut lines = raw_output.lines();
+            let key = lines.next().unwrap_or("").trim();
+            let sel = lines.next().unwrap_or("").trim().to_string();
+            (key.to_string(), sel)
+        } else {
+            (String::new(), raw_output.trim().to_string())
+        };
 
-        // Add to buffer ring (avoid duplicates at the end).
-        if buffer_ring.last() != Some(&file) {
-            buffer_ring.push(file.clone());
+        // ctrl-s: launch zmd search picker, then open the result.
+        if pressed_key == "ctrl-s" {
+            if let Some(ref root) = zmd_root {
+                if let Ok(Some(path)) = input::zmd_search_pick(root) {
+                    if buffer_ring.last() != Some(&path) {
+                        buffer_ring.push(path);
+                    }
+                    buffer_index = buffer_ring.len() - 1;
+                    // Fall through to the inner buffer-ring loop below.
+                } else {
+                    continue; // User cancelled zmd search — return to fzf.
+                }
+            } else {
+                continue;
+            }
+        } else {
+            if selected.is_empty() {
+                return Ok(());
+            }
+
+            let file = PathBuf::from(&selected);
+
+            // Add to buffer ring (avoid duplicates at the end).
+            if buffer_ring.last() != Some(&file) {
+                buffer_ring.push(file.clone());
+            }
+            buffer_index = buffer_ring.len() - 1;
         }
-        buffer_index = buffer_ring.len() - 1;
 
         // Open the selected file — then loop on Ctrl-n / Ctrl-p to cycle
         // through the buffer ring without returning to fzf.
@@ -595,6 +742,13 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                             buffer_index =
                                 (buffer_index + buffer_ring.len() - 1) % buffer_ring.len();
                         }
+                    }
+                    viewer::ViewerExit::ZmdOpen(path) => {
+                        // Add zmd result to the buffer ring and navigate to it.
+                        if buffer_ring.last() != Some(&path) {
+                            buffer_ring.push(path);
+                        }
+                        buffer_index = buffer_ring.len() - 1;
                     }
                 }
                 continue;
@@ -674,6 +828,13 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                     if buffer_ring.len() > 1 {
                         buffer_index = (buffer_index + buffer_ring.len() - 1) % buffer_ring.len();
                     }
+                }
+                viewer::ViewerExit::ZmdOpen(path) => {
+                    // Add zmd result to the buffer ring and navigate to it.
+                    if buffer_ring.last() != Some(&path) {
+                        buffer_ring.push(path);
+                    }
+                    buffer_index = buffer_ring.len() - 1;
                 }
             }
         }
