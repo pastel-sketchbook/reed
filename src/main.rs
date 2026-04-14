@@ -678,8 +678,8 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
 
         if !output.status.success() {
             // fzf exits 1 on Ctrl-C / Esc — not an error, just quit.
-            // Reset SGR to prevent stale ANSI state leaking to the shell prompt.
-            print!("\x1b[0m");
+            // Reset SGR + carriage return so the shell prompt starts at column 0.
+            print!("\x1b[0m\r");
             return Ok(());
         }
 
@@ -714,7 +714,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                 continue;
             }
         } else if selected.is_empty() {
-            print!("\x1b[0m");
+            print!("\x1b[0m\r");
             return Ok(());
         } else {
             let file = PathBuf::from(&selected);

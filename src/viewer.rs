@@ -1262,9 +1262,10 @@ pub fn run(
         cursor::Show
     );
     let _ = terminal::disable_raw_mode();
-    // Reset SGR so no stale ANSI attributes (bold, reverse, color) leak
-    // into the shell prompt after reed exits.
-    let _ = stdout.write_all(b"\x1b[0m");
+    // Reset SGR and move cursor to column 0 so the shell prompt starts
+    // at the left edge.  Without the explicit \r, stale cursor positions
+    // from fzf overlays (e.g. zmd search) can leave the prompt indented.
+    let _ = stdout.write_all(b"\x1b[0m\r");
     let _ = stdout.flush();
 
     result
