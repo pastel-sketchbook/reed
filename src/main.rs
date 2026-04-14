@@ -43,6 +43,11 @@ struct Cli {
     #[arg(long)]
     preview: bool,
 
+    /// Highlight occurrences of a search term in preview output.
+    /// Used internally by the zmd search fzf preview command.
+    #[arg(long, hide = true)]
+    highlight: Option<String>,
+
     /// Initial theme (overrides saved preference). Use `t`/`T` to cycle at runtime.
     #[arg(long)]
     theme: Option<String>,
@@ -80,6 +85,11 @@ struct Cli {
     /// Used internally by the fzf picker's change:reload binding.
     #[arg(long, hide = true)]
     zmd_reload: Option<String>,
+
+    /// zmd search mode: "search" (FTS, default) or "query" (hybrid/semantic).
+    /// Used internally alongside --zmd-reload.
+    #[arg(long, hide = true, default_value = "search")]
+    zmd_mode: String,
 }
 
 #[expect(clippy::too_many_lines)]
@@ -123,10 +133,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // zmd reload: run `zmd query`, parse JSON, print tab-separated lines for fzf.
-    // Used internally by the fzf picker's change:reload binding.
+    // zmd reload: run `zmd search` or `zmd query`, parse JSON, print tab-separated
+    // lines for fzf. Used internally by the fzf picker's change:reload binding.
     if let Some(query) = cli.zmd_reload {
-        return zmd_reload(&query);
+        return zmd_reload(&query, &cli.zmd_mode);
     }
 
     // No file argument → launch fzf picker mode.
@@ -170,7 +180,13 @@ fn main() -> Result<()> {
             viewer::print_to_stdout(&markdown);
             return Ok(());
         } else if cli.preview {
-            return viewer::preview(&markdown, cli.theme.as_deref(), cli.line, &base_dir);
+            return viewer::preview(
+                &markdown,
+                cli.theme.as_deref(),
+                cli.line,
+                &base_dir,
+                cli.highlight.as_deref(),
+            );
         }
         return viewer::run(
             &markdown,
@@ -267,7 +283,13 @@ fn main() -> Result<()> {
         }
     } else if cli.preview {
         if is_markdown {
-            viewer::preview(&raw_content, cli.theme.as_deref(), cli.line, &base_dir)
+            viewer::preview(
+                &raw_content,
+                cli.theme.as_deref(),
+                cli.line,
+                &base_dir,
+                cli.highlight.as_deref(),
+            )
         } else {
             viewer::preview_code(
                 &raw_content,
@@ -340,14 +362,14 @@ fn cycle_theme(forward: bool) -> Result<()> {
 
 // ── zmd reload (for fzf change:reload) ──────────────────────────
 
-/// Run `zmd query <query> --json`, parse the JSON output, and print
-/// tab-separated lines to stdout for fzf consumption.
+/// Run `zmd search` or `zmd query` (depending on `mode`), parse the JSON
+/// output, and print tab-separated lines to stdout for fzf consumption.
 ///
 /// Each output line: `collection/path\ttitle`
 ///
 /// Used internally by the fzf picker's `change:reload` binding so that
 /// all JSON parsing stays in Rust (no sed/python dependency).
-fn zmd_reload(query: &str) -> Result<()> {
+fn zmd_reload(query: &str, mode: &str) -> Result<()> {
     use std::io::Write;
 
     if query.is_empty() {
@@ -358,15 +380,18 @@ fn zmd_reload(query: &str) -> Result<()> {
         return Ok(());
     };
 
+    // "search" → FTS (precise keyword matching), "query" → hybrid (FTS + vector).
+    let subcommand = if mode == "query" { "query" } else { "search" };
+
     let output = Command::new("zmd")
-        .arg("query")
+        .arg(subcommand)
         .arg(query)
         .arg("--json")
         .current_dir(&zmd_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
-        .context("failed to run zmd query")?;
+        .context(format!("failed to run zmd {subcommand}"))?;
 
     if !output.status.success() {
         return Ok(());
@@ -435,6 +460,7 @@ fn view_stdin(
             theme,
             line,
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            None, // No search highlighting for stdin preview.
         );
     }
 

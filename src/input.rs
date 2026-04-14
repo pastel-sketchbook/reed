@@ -979,16 +979,51 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
         let reed_escaped = shell_escape_str(&reed_bin.display().to_string());
         let zmd_root_str = zmd_root.display().to_string();
 
-        // The reload command: reed itself parses zmd query JSON and
-        // outputs tab-separated lines (collection/path \t title).
-        let reload_cmd = format!("{reed_escaped} --zmd-reload {{q}}");
+        // Reload commands for the two search modes:
+        //   FTS   → `zmd search` (precise keyword matching, default)
+        //   Hybrid → `zmd query` (FTS + vector/semantic)
+        let reload_fts = format!("{reed_escaped} --zmd-reload {{q}} --zmd-mode search");
+        let reload_sem = format!("{reed_escaped} --zmd-reload {{q}} --zmd-mode query");
 
-        // Preview command: pipe zmd get through reed --preview for rendered markdown
-        // (including mermaid diagrams and images, just like the main fzf picker).
-        // Write to a temp file to avoid command-substitution issues with large docs.
+        // Preview command: pipe zmd get through reed --preview for rendered markdown.
+        // Also pass --highlight {q} so search terms are highlighted in the preview.
         let context_cmd = format!(
-            r#"cd {zmd_root_escaped} && zmd get zmd://{{1}} > /tmp/reed-zmd-preview.md 2>/dev/null && [ -s /tmp/reed-zmd-preview.md ] && {reed_escaped} --preview /tmp/reed-zmd-preview.md"#,
+            r#"cd {zmd_root_escaped} && zmd get zmd://{{1}} > /tmp/reed-zmd-preview.md 2>/dev/null && [ -s /tmp/reed-zmd-preview.md ] && {reed_escaped} --preview --highlight {{q}} /tmp/reed-zmd-preview.md"#,
             zmd_root_escaped = shell_escape_str(&zmd_root_str)
+        );
+
+        // ctrl-t toggle: swap between FTS and semantic mode.
+        // Uses fzf's `transform` action to change the prompt, reload command, and
+        // header to reflect the current mode. The prompt serves as mode state:
+        //   "zmd search> " → FTS mode (default)
+        //   "zmd query> "  → semantic/hybrid mode
+        let ctrl_t_binding = format!(
+            concat!(
+                "ctrl-t:transform:",
+                "if [[ $FZF_PROMPT == *search* ]]; then ",
+                "echo \"change-prompt(zmd query> )+change-header(ctrl-t: switch to FTS)+reload({reload_sem})\"; ",
+                "else ",
+                "echo \"change-prompt(zmd search> )+change-header(ctrl-t: switch to semantic)+reload({reload_fts})\"; ",
+                "fi"
+            ),
+            reload_sem = reload_sem,
+            reload_fts = reload_fts,
+        );
+
+        // change:transform — on every keystroke, check the current prompt to
+        // decide which reload command to use. This keeps the search mode in
+        // sync after a ctrl-t toggle.
+        let change_binding = format!(
+            concat!(
+                "change:transform:",
+                "if [[ $FZF_PROMPT == *search* ]]; then ",
+                "echo \"reload({reload_fts})\"; ",
+                "else ",
+                "echo \"reload({reload_sem})\"; ",
+                "fi"
+            ),
+            reload_fts = reload_fts,
+            reload_sem = reload_sem,
         );
 
         let mut child = Command::new("fzf")
@@ -996,7 +1031,9 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
             .arg("--no-multi")
             .arg("--disabled") // disable fzf's built-in filter; we do our own via reload
             .arg("--prompt")
-            .arg("zmd> ")
+            .arg("zmd search> ")
+            .arg("--header")
+            .arg("ctrl-t: switch to semantic")
             .arg("--delimiter")
             .arg("\t")
             .arg("--with-nth")
@@ -1016,9 +1053,11 @@ fn fzf_zmd_picker(zmd_root: &std::path::Path) -> Result<Option<std::path::PathBu
             .arg("--color")
             .arg("bg:-1")
             .arg("--bind")
-            .arg(format!("change:reload:{reload_cmd}"))
+            .arg(&change_binding)
             .arg("--bind")
             .arg("start:reload:true") // start empty, type to search
+            .arg("--bind")
+            .arg(&ctrl_t_binding)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

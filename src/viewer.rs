@@ -169,6 +169,7 @@ pub fn preview(
     theme_name: Option<&str>,
     start_line: Option<usize>,
     base_dir: &Path,
+    highlight_query: Option<&str>,
 ) -> Result<()> {
     // Resolve theme: CLI flag > saved preference (Ghostty-aware) > default.
     let prefs = config::load_preferences();
@@ -249,6 +250,18 @@ pub fn preview(
         cleaned.replace("\r\n", "\n")
     };
 
+    // Build a list of case-insensitive search terms for highlighting.
+    // Split the query into whitespace-separated words so each word is
+    // highlighted independently (like DuckDuckGo).
+    let hl_terms: Vec<String> = highlight_query
+        .map(|q| {
+            q.split_whitespace()
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Output all lines — fzf handles scrolling internally.
     let lines: Vec<&str> = rendered.lines().collect();
     let start_offset = start_line.unwrap_or(1).saturating_sub(1);
@@ -315,19 +328,157 @@ pub fn preview(
                     .iter()
                     .any(|p| i > p.content_row && i < p.content_row + usize::from(p.rows));
                 if !in_placeholder {
-                    writeln!(stdout, "{line}")?;
+                    let out = highlight_ansi_line(line, &hl_terms);
+                    writeln!(stdout, "{out}")?;
                 }
             }
         }
     } else {
         // Non-Kitty or no images: just output text lines.
         for (_i, line) in lines.iter().enumerate().skip(start_offset) {
-            writeln!(stdout, "{line}")?;
+            let out = highlight_ansi_line(line, &hl_terms);
+            writeln!(stdout, "{out}")?;
         }
     }
 
     stdout.flush()?;
     Ok(())
+}
+
+/// Highlight occurrences of search terms in an ANSI-encoded line.
+///
+/// Walks the line character-by-character, skipping ANSI escape sequences,
+/// and wraps matching visible-text runs with reverse-video highlighting.
+/// Returns the original line unchanged if `terms` is empty.
+fn highlight_ansi_line(line: &str, terms: &[String]) -> String {
+    if terms.is_empty() {
+        return line.to_string();
+    }
+
+    // First, extract the visible (non-ANSI) text and build a mapping from
+    // visible-char index → byte position in the original string.
+    let mut visible = String::new();
+    let mut vis_to_byte: Vec<usize> = Vec::new(); // vis_to_byte[vis_idx] = byte start in `line`
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Skip CSI sequence: ESC [ ... final_byte (0x40–0x7E).
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // skip final byte
+            }
+        } else {
+            // Visible character — may be multi-byte UTF-8.
+            let ch_start = i;
+            // Decode one UTF-8 char.
+            if let Some(ch) = line[i..].chars().next() {
+                vis_to_byte.push(ch_start);
+                visible.push(ch);
+                i += ch.len_utf8();
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Find all match ranges on the visible text (case-insensitive).
+    let visible_lower = visible.to_lowercase();
+    let mut match_ranges: Vec<(usize, usize)> = Vec::new(); // (start, end) in visible indices
+    for term in terms {
+        let mut search_from = 0;
+        while let Some(pos) = visible_lower[search_from..].find(term.as_str()) {
+            let start = search_from + pos;
+            let end = start + term.len();
+            match_ranges.push((start, end));
+            search_from = end;
+        }
+    }
+
+    if match_ranges.is_empty() {
+        return line.to_string();
+    }
+
+    // Sort and merge overlapping ranges.
+    match_ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in match_ranges {
+        if let Some(last) = merged.last_mut()
+            && s <= last.1
+        {
+            last.1 = last.1.max(e);
+            continue;
+        }
+        merged.push((s, e));
+    }
+
+    // Rebuild the line: copy original bytes, injecting highlight escapes
+    // around matched visible-character ranges.
+    //
+    // Strategy: walk the original line byte-by-byte.  Track the current
+    // visible-character index.  When entering/leaving a highlight region,
+    // emit the appropriate ANSI escape.
+    const HL_ON: &str = "\x1b[1;7m"; // bold + reverse video
+    const HL_OFF: &str = "\x1b[27;22m"; // reverse-off + bold-off
+
+    let mut result = String::with_capacity(line.len() + merged.len() * 16);
+    let mut vis_idx: usize = 0;
+    let mut in_highlight = false;
+    let mut merge_idx = 0; // pointer into merged ranges
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Copy the entire ANSI escape sequence as-is.
+            let seq_start = i;
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            result.push_str(&line[seq_start..i]);
+        } else {
+            // Visible character.
+            // Check if we need to start or stop highlighting.
+            if merge_idx < merged.len() {
+                let (ms, me) = merged[merge_idx];
+                if !in_highlight && vis_idx >= ms && vis_idx < me {
+                    result.push_str(HL_ON);
+                    in_highlight = true;
+                }
+                if in_highlight && vis_idx >= me {
+                    result.push_str(HL_OFF);
+                    in_highlight = false;
+                    merge_idx += 1;
+                    // Check if the next range starts here.
+                    if merge_idx < merged.len() && vis_idx >= merged[merge_idx].0 {
+                        result.push_str(HL_ON);
+                        in_highlight = true;
+                    }
+                }
+            }
+
+            if let Some(ch) = line[i..].chars().next() {
+                result.push(ch);
+                i += ch.len_utf8();
+                vis_idx += 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Close any open highlight at end of line.
+    if in_highlight {
+        result.push_str(HL_OFF);
+    }
+
+    result
 }
 
 /// Preview mode for non-markdown code files: syntax-highlight with `syntect`
