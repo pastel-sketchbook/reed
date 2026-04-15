@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "reed"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "base64",

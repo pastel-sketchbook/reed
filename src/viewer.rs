@@ -74,7 +74,8 @@ pub fn fzf_header_line(theme: &Theme, zmd_available: bool) -> String {
     );
     if zmd_available {
         header.push_str(&format!(
-            "\n{accent}{ANSI_BOLD}^s{ANSI_NORMAL} {fg}zmd Search{ANSI_RESET}"
+            "\n{accent}{ANSI_BOLD}^s{ANSI_NORMAL} {fg}zmd Search  \
+             {accent}{ANSI_BOLD}^r{ANSI_NORMAL} {fg}Refs{ANSI_RESET}"
         ));
     }
     header
@@ -585,6 +586,8 @@ enum LoopExit {
     ExportHtml,
     /// Open a file from zmd semantic search.
     ZmdOpen(std::path::PathBuf),
+    /// Open a referenced precedent (case citation).
+    OpenCaseRef(std::path::PathBuf),
 }
 
 /// What caused the viewer to exit — returned to the caller so it can
@@ -900,6 +903,9 @@ pub fn run(
         // Extract code blocks once for clipboard copy (the `c` key).
         let mut code_blocks = input::extract_code_blocks(&markdown_owned);
 
+        // Extract case citations once for precedent reference picker (the `r` key).
+        let mut case_refs = input::extract_case_citations(&markdown_owned);
+
         // Mutable scroll target — set by --line flag or fzf heading jump.
         // Consumed on first use, then reset to None.
         let mut goto_line = initial_line;
@@ -1065,6 +1071,7 @@ pub fn run(
                 follow_mode,
                 cell_h,
                 zmd_root.as_deref(),
+                &case_refs,
             )? {
                 LoopExit::Quit => break,
                 LoopExit::BufferNext => {
@@ -1194,6 +1201,7 @@ pub fn run(
                         headings = input::extract_headings(&markdown_owned);
                         links = input::extract_links(&markdown_owned);
                         code_blocks = input::extract_code_blocks(&markdown_owned);
+                        case_refs = input::extract_case_citations(&markdown_owned);
 
                         // Re-extract images and mermaid blocks.
                         if has_graphics {
@@ -1251,6 +1259,10 @@ pub fn run(
                     goto_line = Some(scroll_pos + 1);
                 }
                 LoopExit::ZmdOpen(path) => {
+                    viewer_exit = ViewerExit::ZmdOpen(path);
+                    break;
+                }
+                LoopExit::OpenCaseRef(path) => {
                     viewer_exit = ViewerExit::ZmdOpen(path);
                     break;
                 }
@@ -1520,6 +1532,7 @@ fn run_inner_loop<'a>(
     follow_mode: bool,
     cell_h: u16,
     zmd_root: Option<&Path>,
+    case_refs: &[input::CaseRef],
 ) -> Result<LoopExit> {
     let mut frame_count: u32 = 0;
     loop {
@@ -1818,7 +1831,14 @@ fn run_inner_loop<'a>(
             }
         }
 
-        match input::poll(term, render_state, content_rows, headings, zmd_root)? {
+        match input::poll(
+            term,
+            render_state,
+            content_rows,
+            headings,
+            zmd_root,
+            case_refs,
+        )? {
             input::Action::Continue => {}
             input::Action::Quit => return Ok(LoopExit::Quit),
             input::Action::NextTheme => return Ok(LoopExit::NextTheme),
@@ -1845,6 +1865,7 @@ fn run_inner_loop<'a>(
             input::Action::JumpToMark(ch) => return Ok(LoopExit::JumpToMark(ch)),
             input::Action::ExportHtml => return Ok(LoopExit::ExportHtml),
             input::Action::ZmdOpen(path) => return Ok(LoopExit::ZmdOpen(path)),
+            input::Action::OpenCaseRef(path) => return Ok(LoopExit::OpenCaseRef(path)),
         }
     }
 }
@@ -2339,6 +2360,7 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
     ("m + a-z", "Set bookmark"),
     ("' + a-z", "Jump to bookmark"),
     ("e", "Export to HTML"),
+    ("r", "Referenced precedents"),
     ("S", "zmd search (if available)"),
     ("", ""),
     ("t / T", "Next / previous theme"),
