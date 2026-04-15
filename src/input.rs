@@ -112,7 +112,7 @@ pub fn extract_headings(markdown: &str) -> Vec<Heading> {
 /// `headings` are pre-extracted from the markdown for fzf heading navigation.
 ///
 /// `case_refs` are pre-extracted case citations for the precedent reference picker.
-#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
 pub fn poll<'a>(
     term: &mut Terminal<'a, 'a>,
     _render: &mut RenderState<'a>,
@@ -509,9 +509,10 @@ pub fn extract_links(markdown: &str) -> Vec<Link> {
 
     // OK: constant regex patterns — panics only if the literal patterns are malformed.
     static MD_LINK: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
-    static BARE_URL: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:^|[\s(<])((https?://[^\s)>]+))").unwrap());
+        LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("valid regex literal"));
+    static BARE_URL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:^|[\s(<])((https?://[^\s)>]+))").expect("valid regex literal")
+    });
 
     let mut links = Vec::new();
     let mut seen_urls = std::collections::HashSet::new();
@@ -975,6 +976,7 @@ fn zmd_get_content(zmd_root: &std::path::Path, uri: &str) -> Option<String> {
 /// the main fzf picker (main screen, no alternate-screen dance needed).
 ///
 /// Returns `None` if the user cancelled or no results were found.
+#[allow(clippy::too_many_lines)]
 fn fzf_zmd_picker(
     zmd_root: &std::path::Path,
     in_alternate_screen: bool,
@@ -1023,7 +1025,7 @@ fn fzf_zmd_picker(
         // Preview command: pipe zmd get through reed --preview for rendered markdown.
         // Also pass --highlight {q} so search terms are highlighted in the preview.
         let context_cmd = format!(
-            r#"cd {zmd_root_escaped} && zmd get zmd://{{1}} > /tmp/reed-zmd-preview.md 2>/dev/null && [ -s /tmp/reed-zmd-preview.md ] && {reed_escaped} --preview --highlight {{q}} /tmp/reed-zmd-preview.md"#,
+            r"cd {zmd_root_escaped} && zmd get zmd://{{1}} > /tmp/reed-zmd-preview.md 2>/dev/null && [ -s /tmp/reed-zmd-preview.md ] && {reed_escaped} --preview --highlight {{q}} /tmp/reed-zmd-preview.md",
             zmd_root_escaped = shell_escape_str(&zmd_root_str)
         );
 
@@ -1265,6 +1267,8 @@ pub fn extract_case_citations(markdown: &str) -> Vec<CaseRef> {
     use regex::Regex;
     use std::sync::LazyLock;
 
+    // Constant regex patterns — panics only if the literal patterns are malformed.
+
     // Pattern for structured citations in 참조판례:
     //   대법원 YYYY. M. D. 선고 CASE_NUM 판결
     //   헌법재판소 YYYY. M. D. 선고 CASE_NUM 결정
@@ -1272,13 +1276,18 @@ pub fn extract_case_citations(markdown: &str) -> Vec<CaseRef> {
         Regex::new(
             r"(대법원|헌법재판소)\s+(\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.)\s*선고\s+(\d{2,4}[가-힣]{1,3}\d+(?:_\d+)?)\s+(?:판결|결정)",
         )
-        .unwrap()
+        .expect("valid regex literal")
     });
 
     // Pattern for case numbers that appear standalone (digits + Korean syllables + digits).
     // This catches citations that may lack the full "court date 선고" prefix.
-    static CASE_NUM: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\d{2,4}[가-힣]{1,3}\d+(?:_\d+)?").unwrap());
+    static CASE_NUM: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\d{2,4}[가-힣]{1,3}\d+(?:_\d+)?").expect("valid regex literal")
+    });
+
+    // Match content inside parentheses that contain "참조".
+    static PAREN_REF: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\(([^)]*참조)\)").expect("valid regex literal"));
 
     let mut refs = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1326,8 +1335,6 @@ pub fn extract_case_citations(markdown: &str) -> Vec<CaseRef> {
     }
 
     // ── 3. Scan for bare case numbers inside parenthetical "참조" blocks ──
-    // Match content inside parentheses that contain "참조".
-    static PAREN_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(([^)]*참조)\)").unwrap());
     for paren in PAREN_REF.captures_iter(markdown) {
         let content = &paren[1];
         for m in CASE_NUM.find_iter(content) {

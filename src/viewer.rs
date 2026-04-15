@@ -73,10 +73,11 @@ pub fn fzf_header_line(theme: &Theme, zmd_available: bool) -> String {
          {accent}{ANSI_BOLD}enter{ANSI_NORMAL} {fg}Open{ANSI_RESET}",
     );
     if zmd_available {
-        header.push_str(&format!(
+        let _ = write!(
+            header,
             "\n{accent}{ANSI_BOLD}^s{ANSI_NORMAL} {fg}zmd Search  \
              {accent}{ANSI_BOLD}^r{ANSI_NORMAL} {fg}Refs{ANSI_RESET}"
-        ));
+        );
     }
     header
 }
@@ -181,6 +182,7 @@ pub fn print_to_stdout(markdown: &str) {
 /// When `start_line` is set, output begins at that 1-indexed line.
 ///
 /// `base_dir` is used to resolve relative image paths in `![alt](path)` references.
+#[allow(clippy::too_many_lines)]
 pub fn preview(
     markdown: &str,
     theme_name: Option<&str>,
@@ -274,7 +276,7 @@ pub fn preview(
         .map(|q| {
             q.split_whitespace()
                 .filter(|w| !w.is_empty())
-                .map(|w| w.to_lowercase())
+                .map(str::to_lowercase)
                 .collect()
         })
         .unwrap_or_default();
@@ -367,7 +369,11 @@ pub fn preview(
 /// Walks the line character-by-character, skipping ANSI escape sequences,
 /// and wraps matching visible-text runs with reverse-video highlighting.
 /// Returns the original line unchanged if `terms` is empty.
+#[allow(clippy::too_many_lines)]
 fn highlight_ansi_line(line: &str, terms: &[String]) -> String {
+    const HL_ON: &str = "\x1b[1;7m"; // bold + reverse video
+    const HL_OFF: &str = "\x1b[27;22m"; // reverse-off + bold-off
+
     if terms.is_empty() {
         return line.to_string();
     }
@@ -443,8 +449,6 @@ fn highlight_ansi_line(line: &str, terms: &[String]) -> String {
     // Strategy: walk the original line byte-by-byte.  Track the current
     // visible-character index.  When entering/leaving a highlight region,
     // emit the appropriate ANSI escape.
-    const HL_ON: &str = "\x1b[1;7m"; // bold + reverse video
-    const HL_OFF: &str = "\x1b[27;22m"; // reverse-off + bold-off
 
     let mut result = String::with_capacity(line.len() + merged.len() * 16);
     let mut vis_idx: usize = 0;
@@ -1258,11 +1262,7 @@ pub fn run(
                     }
                     goto_line = Some(scroll_pos + 1);
                 }
-                LoopExit::ZmdOpen(path) => {
-                    viewer_exit = ViewerExit::ZmdOpen(path);
-                    break;
-                }
-                LoopExit::OpenCaseRef(path) => {
+                LoopExit::ZmdOpen(path) | LoopExit::OpenCaseRef(path) => {
                     viewer_exit = ViewerExit::ZmdOpen(path);
                     break;
                 }
@@ -1637,10 +1637,10 @@ fn run_inner_loop<'a>(
                 while let Some(cell) = cell_iter.next() {
                     // Skip spacer cells for wide (CJK) characters — the
                     // preceding Wide cell already occupies two columns.
-                    if let Ok(raw) = cell.raw_cell() {
-                        if matches!(raw.wide(), Ok(CellWide::SpacerTail | CellWide::SpacerHead)) {
-                            continue;
-                        }
+                    if let Ok(raw) = cell.raw_cell()
+                        && matches!(raw.wide(), Ok(CellWide::SpacerTail | CellWide::SpacerHead))
+                    {
+                        continue;
                     }
 
                     let graphemes: Vec<char> = cell.graphemes()?;
@@ -1926,7 +1926,7 @@ fn emit_visible_images(
         // Clamp to the available content area so the image never extends
         // beyond the footer or terminal border.
         let available_rows = content_rows.saturating_sub(screen_row);
-        let visible_rows = (placement.rows - skip_rows).min(available_rows);
+        let visible_rows = placement.rows.saturating_sub(skip_rows).min(available_rows);
         if visible_rows == 0 {
             continue;
         }
@@ -1942,9 +1942,8 @@ fn emit_visible_images(
             visible_rows,
             cell_h,
         );
-        let png_data = match cropped.as_deref() {
-            Some(data) => data,
-            None => continue, // decode failure — skip image to avoid overflow
+        let Some(png_data) = cropped.as_deref() else {
+            continue; // decode failure — skip image to avoid overflow
         };
 
         // Position cursor at the image location (after TOC + left padding).

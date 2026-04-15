@@ -719,22 +719,20 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             let file = PathBuf::from(&selected);
             if let Ok(content) = std::fs::read_to_string(&file) {
                 let case_refs = input::extract_case_citations(&content);
-                if !case_refs.is_empty() {
-                    if let Some(ref root) = zmd_root {
-                        if let Ok(Some(path)) = input::case_ref_pick(&case_refs, root) {
-                            if buffer_ring.last() != Some(&path) {
-                                buffer_ring.push(path);
-                            }
-                            buffer_index = buffer_ring.len() - 1;
-                            // Fall through to inner buffer-ring loop.
-                        } else {
-                            continue; // User cancelled — return to fzf.
+                if case_refs.is_empty() {
+                    continue; // No case refs in this file.
+                } else if let Some(ref root) = zmd_root {
+                    if let Ok(Some(path)) = input::case_ref_pick(&case_refs, root) {
+                        if buffer_ring.last() != Some(&path) {
+                            buffer_ring.push(path);
                         }
+                        buffer_index = buffer_ring.len() - 1;
+                        // Fall through to inner buffer-ring loop.
                     } else {
-                        continue;
+                        continue; // User cancelled — return to fzf.
                     }
                 } else {
-                    continue; // No case refs in this file.
+                    continue;
                 }
             } else {
                 continue; // Could not read file.
