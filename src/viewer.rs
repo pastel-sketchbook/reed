@@ -13,6 +13,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use libghostty_vt::render::{CellIterator, RowIterator};
+use libghostty_vt::screen::CellWide;
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use termimad::MadSkin;
 use tracing::{debug, warn};
@@ -1621,6 +1622,14 @@ fn run_inner_loop<'a>(
                 let h_off = h_offset.min(u16::MAX as usize) as u16;
 
                 while let Some(cell) = cell_iter.next() {
+                    // Skip spacer cells for wide (CJK) characters — the
+                    // preceding Wide cell already occupies two columns.
+                    if let Ok(raw) = cell.raw_cell() {
+                        if matches!(raw.wide(), Ok(CellWide::SpacerTail | CellWide::SpacerHead)) {
+                            continue;
+                        }
+                    }
+
                     let graphemes: Vec<char> = cell.graphemes()?;
                     let style = cell.style()?;
 
