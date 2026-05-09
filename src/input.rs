@@ -1272,6 +1272,7 @@ pub fn extract_case_citations(markdown: &str) -> Vec<CaseRef> {
     // Pattern for structured citations in 참조판례:
     //   대법원 YYYY. M. D. 선고 CASE_NUM 판결
     //   헌법재판소 YYYY. M. D. 선고 CASE_NUM 결정
+    // OK: constant regex patterns — panics only if the literal patterns are malformed.
     static STRUCTURED: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"(대법원|헌법재판소)\s+(\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.)\s*선고\s+(\d{2,4}[가-힣]{1,3}\d+(?:_\d+)?)\s+(?:판결|결정)",
@@ -1281,11 +1282,13 @@ pub fn extract_case_citations(markdown: &str) -> Vec<CaseRef> {
 
     // Pattern for case numbers that appear standalone (digits + Korean syllables + digits).
     // This catches citations that may lack the full "court date 선고" prefix.
+    // OK: constant regex pattern — panics only if the literal pattern is malformed.
     static CASE_NUM: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"\d{2,4}[가-힣]{1,3}\d+(?:_\d+)?").expect("valid regex literal")
     });
 
     // Match content inside parentheses that contain "참조".
+    // OK: constant regex pattern — panics only if the literal pattern is malformed.
     static PAREN_REF: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\(([^)]*참조)\)").expect("valid regex literal"));
 

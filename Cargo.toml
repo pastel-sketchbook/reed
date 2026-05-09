@@ -1,14 +1,15 @@
 [package]
 name = "reed"
-version = "0.5.8"
+version = "0.6.0"
 edition = "2024"
+rust-version = "1.95.0"
 description = "Terminal markdown viewer powered by libghostty-vt"
 license = "MIT"
 
 [dependencies]
 anyhow = "1.0.102"
 base64 = "0.22.1"
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.29.0"
 directories = "6.0.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -19,6 +20,12 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-sy
 termimad = "0.34.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-toml = "1.1.0"
+toml = "1.1.2"
 unicode-width = "0.2.2"
 pulldown-cmark = "0.13.3"
+magika = { version = "1.1.0", optional = true }
+ort = { version = "=2.0.0-rc.12", default-features = true, optional = true }
+
+[features]
+default = ["detect-content-type"]
+detect-content-type = ["dep:magika", "dep:ort"]

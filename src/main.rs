@@ -1,4 +1,5 @@
 mod config;
+mod file_type;
 mod highlight;
 mod images;
 mod input;
@@ -110,6 +111,9 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
         })
         .init();
+
+    // Initialise Magika content detection (best-effort; disabled if it fails).
+    file_type::init();
 
     // Theme cycling mode: update preference and exit immediately.
     if cli.next_theme || cli.prev_theme {
@@ -253,12 +257,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let is_markdown = highlight::is_markdown_path(&file);
-    let code_lang = if is_markdown {
-        None
-    } else {
-        highlight::lang_for_path(&file)
-    };
+    let (is_markdown, code_lang) = detect_file_kind(&file);
 
     let filename = file.display().to_string();
 
@@ -322,12 +321,8 @@ fn main() -> Result<()> {
                 viewer::ViewerExit::ZmdOpen(path) => {
                     current_content = std::fs::read_to_string(&path)
                         .with_context(|| format!("failed to read {}", path.display()))?;
-                    let is_md = highlight::is_markdown_path(&path);
-                    current_code_lang = if is_md {
-                        None
-                    } else {
-                        highlight::lang_for_path(&path)
-                    };
+                    let (is_md, new_code_lang) = detect_file_kind(&path);
+                    current_code_lang = if is_md { None } else { new_code_lang };
                     current_filename = path.display().to_string();
                     current_base_dir = path
                         .canonicalize()
@@ -449,19 +444,41 @@ fn view_stdin(
         bail!("no input received on stdin");
     }
 
+    // Detect content type from bytes (no file extension available).
+    let detected = file_type::detect_bytes(content.as_bytes());
+    let is_markdown = detected
+        .as_ref()
+        .is_none_or(|d| file_type::is_detected_markdown(d));
+    let code_lang = if is_markdown {
+        None
+    } else {
+        detected
+            .as_ref()
+            .and_then(|d| file_type::label_to_lang(&d.label))
+            .map(String::from)
+    };
+
     if print {
-        viewer::print_to_stdout(&content);
+        if is_markdown {
+            viewer::print_to_stdout(&content);
+        } else {
+            viewer::preview_code(&content, code_lang.as_deref(), theme, None)?;
+        }
         return Ok(());
     }
 
     if preview {
-        return viewer::preview(
-            &content,
-            theme,
-            line,
-            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            None, // No search highlighting for stdin preview.
-        );
+        return if is_markdown {
+            viewer::preview(
+                &content,
+                theme,
+                line,
+                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                None,
+            )
+        } else {
+            viewer::preview_code(&content, code_lang.as_deref(), theme, line)
+        };
     }
 
     // Interactive mode: we need to reopen the TTY for crossterm since
@@ -478,7 +495,7 @@ fn view_stdin(
         "<stdin>",
         &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         line,
-        None,
+        code_lang.as_deref(),
         Some(tmp_path.as_path()),
         None,
     )
@@ -826,12 +843,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             let raw_content = std::fs::read_to_string(cur_file)
                 .with_context(|| format!("failed to read {}", cur_file.display()))?;
 
-            let is_markdown = highlight::is_markdown_path(cur_file);
-            let code_lang = if is_markdown {
-                None
-            } else {
-                highlight::lang_for_path(cur_file)
-            };
+            let (is_markdown, code_lang) = detect_file_kind(cur_file);
 
             let filename = cur_file.display().to_string();
             let base_dir = cur_file
@@ -965,6 +977,41 @@ fn is_binary(path: &Path) -> bool {
     buf[..n].contains(&0)
 }
 
+/// Determine whether a file is markdown and what syntax language to use,
+/// combining extension-based heuristics with Magika content detection.
+///
+/// Returns `(is_markdown, code_lang)`.  When the extension is unrecognised
+/// (no extension or unknown), Magika is consulted as a fallback.
+fn detect_file_kind(path: &Path) -> (bool, Option<String>) {
+    // Extension-based detection (fast path).
+    let ext_markdown = highlight::is_markdown_path(path);
+    if ext_markdown {
+        return (true, None);
+    }
+    let ext_lang = highlight::lang_for_path(path);
+    if ext_lang.is_some() {
+        return (false, ext_lang);
+    }
+
+    // No recognised extension — ask Magika.
+    if let Some(detected) = file_type::detect_file_type(path) {
+        tracing::debug!(
+            "Magika detected {}: {} (score: {:.2})",
+            path.display(),
+            detected.description,
+            detected.score
+        );
+        if file_type::is_detected_markdown(&detected) {
+            return (true, None);
+        }
+        if let Some(lang) = file_type::label_to_lang(&detected.label) {
+            return (false, Some(lang.to_string()));
+        }
+    }
+
+    (false, None)
+}
+
 /// Document extensions that `pandoc` can convert to markdown.
 const DOCUMENT_EXTS: &[&str] = &["docx", "pptx", "xlsx", "odt", "rtf", "epub"];
 
@@ -1050,6 +1097,7 @@ fn display_image(path: &Path, gfx: images::GraphicsProtocol) -> Result<()> {
         images::GraphicsProtocol::Sixel => {
             images::emit_sixel_image(&mut stdout, &png_data, display_cols, display_rows)?;
         }
+        // Invariant: the caller already verified protocol != None before entering this path.
         images::GraphicsProtocol::None => unreachable!(),
     }
 
@@ -1133,6 +1181,7 @@ fn print_image(path: &Path, gfx: images::GraphicsProtocol) -> Result<()> {
         images::GraphicsProtocol::Sixel => {
             images::emit_sixel_image(&mut stdout, &png_data, display_cols, display_rows)?;
         }
+        // Invariant: the caller already verified protocol != None before entering this path.
         images::GraphicsProtocol::None => unreachable!(),
     }
     writeln!(stdout)?;

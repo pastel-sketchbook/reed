@@ -136,6 +136,7 @@ fn which_cmd(name: &str) -> Option<PathBuf> {
 
 /// Get the cached backend (only valid after `mmdc_available()` returns true).
 fn backend() -> &'static MermaidBackend {
+    // Invariant: every call site is guarded by `mmdc_available()` which initialises BACKEND.
     BACKEND
         .get()
         .and_then(|opt| opt.as_ref())
