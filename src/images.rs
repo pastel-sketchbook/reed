@@ -268,7 +268,7 @@ pub fn load_image(
         return None;
     }
 
-    // Compute display dimensions in cells.
+    // Compute display dimensions in cells (clamped to u16 range).
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let display_cols = (f64::from(target_w) / f64::from(cell_w)).ceil() as u16;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -340,7 +340,7 @@ pub fn load_image_from_bytes(
         return None;
     }
 
-    // Compute display dimensions in cells.
+    // Compute display dimensions in cells (clamped to u16 range).
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let display_cols = (f64::from(target_w) / f64::from(cell_w)).ceil() as u16;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

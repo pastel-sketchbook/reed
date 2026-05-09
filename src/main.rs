@@ -1107,7 +1107,7 @@ fn display_image(path: &Path, gfx: images::GraphicsProtocol) -> Result<()> {
         |n| n.to_string_lossy().into_owned(),
     );
     let hint = format!(" {filename} — press q to exit");
-    execute!(stdout, cursor::MoveTo(0, term_rows - 1))?;
+    execute!(stdout, cursor::MoveTo(0, term_rows.saturating_sub(1)))?;
     write!(
         stdout,
         "\x1b[7m{hint:<width$}\x1b[0m",

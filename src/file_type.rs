@@ -72,10 +72,7 @@ pub fn detect_file_type(path: &Path) -> Option<DetectedType> {
 #[cfg(feature = "detect-content-type")]
 pub fn detect_bytes(bytes: &[u8]) -> Option<DetectedType> {
     let session = MAGIKA.get()?;
-    let guard = session.lock().ok()?;
-    // magika requires &mut self for identify_content_sync
-    // but we hold the Mutex so this is safe.
-    let mut guard = guard;
+    let mut guard = session.lock().ok()?;
     let ft = guard.identify_content_sync(bytes).ok()?;
     let info = ft.info();
     Some(DetectedType {
