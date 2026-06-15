@@ -1,6 +1,6 @@
 [package]
 name = "reed"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.95.0"
 description = "Terminal markdown viewer powered by libghostty-vt"
@@ -14,7 +14,7 @@ crossterm = "0.29.0"
 directories = "6.0.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs" }
-regex = "1.12.3"
+regex = "1.12.4"
 serde = { version = "1.0.228", features = ["derive"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy", "yaml-load"] }
 termimad = "0.34.1"
@@ -22,10 +22,10 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 toml = "1.1.2"
 unicode-width = "0.2.2"
-pulldown-cmark = "0.13.3"
+pulldown-cmark = "0.13.4"
 magika = { version = "1.1.0", optional = true }
 ort = { version = "=2.0.0-rc.12", default-features = true, optional = true }
 
 [features]
-default = ["detect-content-type"]
+default = []
 detect-content-type = ["dep:magika", "dep:ort"]

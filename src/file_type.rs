@@ -44,16 +44,10 @@ pub fn init() -> bool {
 pub struct DetectedType {
     /// Short machine-readable label (e.g. `"markdown"`, `"rust"`, `"png"`).
     pub label: String,
-    /// MIME type (e.g. `"text/markdown"`, `"image/png"`).
-    pub mime_type: String,
     /// Human-readable description (e.g. `"Markdown document"`).
     pub description: String,
-    /// Content group (e.g. `"text"`, `"image"`, `"executable"`).
-    pub group: String,
     /// Confidence score in `[0.0, 1.0]`.
     pub score: f32,
-    /// Whether the content is textual.
-    pub is_text: bool,
 }
 
 // ── Public API ──────────────────────────────────────────────────
@@ -77,11 +71,8 @@ pub fn detect_bytes(bytes: &[u8]) -> Option<DetectedType> {
     let info = ft.info();
     Some(DetectedType {
         label: info.label.to_string(),
-        mime_type: info.mime_type.to_string(),
         description: info.description.to_string(),
-        group: info.group.to_string(),
         score: ft.score(),
-        is_text: info.is_text,
     })
 }
 
@@ -171,31 +162,22 @@ mod tests {
     fn is_detected_markdown_checks_score() {
         let high = DetectedType {
             label: "markdown".into(),
-            mime_type: "text/markdown".into(),
             description: "Markdown".into(),
-            group: "text".into(),
             score: 0.95,
-            is_text: true,
         };
         assert!(is_detected_markdown(&high));
 
         let low = DetectedType {
             label: "markdown".into(),
-            mime_type: "text/markdown".into(),
             description: "Markdown".into(),
-            group: "text".into(),
             score: 0.5,
-            is_text: true,
         };
         assert!(!is_detected_markdown(&low));
 
         let wrong_label = DetectedType {
             label: "txt".into(),
-            mime_type: "text/plain".into(),
             description: "Text".into(),
-            group: "text".into(),
             score: 0.99,
-            is_text: true,
         };
         assert!(!is_detected_markdown(&wrong_label));
     }

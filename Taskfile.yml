@@ -1,6 +1,8 @@
 version: "3"
 env:
   PGM_NAME: reed
+  ZIG_PATH: /opt/homebrew/opt/zig@0.15/bin
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
 tasks:
   default:
     desc: Show available tasks
@@ -15,12 +17,12 @@ tasks:
   check:
     desc: Type-check without building
     cmds:
-      - cargo check
+      - PATH="{{.ZIG_PATH}}:$PATH" cargo check
 
   clippy:
     desc: Run clippy lints
     cmds:
-      - cargo clippy -- -D warnings
+      - PATH="{{.ZIG_PATH}}:$PATH" cargo clippy -- -D warnings
 
   typos:
     desc: Check for typos in source and docs
@@ -32,24 +34,24 @@ tasks:
     cmds:
       - typos
       - cargo fmt --check
-      - cargo clippy -- -D warnings
-      - cargo test
+      - PATH="{{.ZIG_PATH}}:$PATH" cargo clippy -- -D warnings
+      - PATH="{{.ZIG_PATH}}:$PATH" cargo test
 
   test:
     desc: Run unit tests
     cmds:
-      - cargo test
+      - PATH="{{.ZIG_PATH}}:$PATH" cargo test
 
   build:
     desc: Format and build release binary
     cmds:
       - cargo fmt
-      - cargo build --release
+      - PATH="{{.ZIG_PATH}}:$PATH" cargo build --release
 
   dev:
     desc: Build debug binary
     cmds:
-      - cargo build
+      - PATH="{{.ZIG_PATH}}:$PATH" cargo build
 
   run:
     desc: View a markdown file (pass file path via CLI_ARGS)
@@ -58,7 +60,7 @@ tasks:
       LIB_PATH:
         sh: dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" 2>/dev/null | head -1) 2>/dev/null || echo "."
     cmds:
-      - DYLD_LIBRARY_PATH={{.LIB_PATH}} LD_LIBRARY_PATH={{.LIB_PATH}} target/debug/$PGM_NAME {{.CLI_ARGS}}
+      - DYLD_LIBRARY_PATH={{.LIB_PATH}} LD_LIBRARY_PATH={{.LIB_PATH}} PATH="{{.ZIG_PATH}}:$PATH" target/debug/$PGM_NAME {{.CLI_ARGS}}
 
   install:
     desc: Build release and copy to ~/bin
@@ -66,6 +68,7 @@ tasks:
     cmds:
       - cp target/release/$PGM_NAME ~/bin
       - codesign -f -s - ~/bin/$PGM_NAME
+      - echo "Installed $(~/$PGM_NAME --version 2>/dev/null || ~/$PGM_NAME --help 2>/dev/null | head -1)"
 
   clean:
     desc: Remove build artifacts
