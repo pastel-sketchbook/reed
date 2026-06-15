@@ -555,7 +555,7 @@ fn quantize_to_palette(rgba: &[u8], width: u32, height: u32) -> (Vec<[u8; 3]>, V
 
     // Build palette from the most common buckets.
     let mut buckets: Vec<_> = histogram.into_iter().collect();
-    buckets.sort_by(|a, b| b.1.3.cmp(&a.1.3)); // most frequent first
+    buckets.sort_by_key(|b| std::cmp::Reverse(b.1.3)); // most frequent first
     buckets.truncate(SIXEL_MAX_COLORS);
 
     #[allow(clippy::cast_possible_truncation)] // r/g/b sums divided by count always fit in u8

@@ -448,7 +448,7 @@ fn view_stdin(
     let detected = file_type::detect_bytes(content.as_bytes());
     let is_markdown = detected
         .as_ref()
-        .is_none_or(|d| file_type::is_detected_markdown(d));
+        .is_none_or(file_type::is_detected_markdown);
     let code_lang = if is_markdown {
         None
     } else {

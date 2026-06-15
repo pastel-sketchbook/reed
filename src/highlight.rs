@@ -247,10 +247,8 @@ fn find_syntax(
 fn extract_fence_lang(trimmed: &str) -> Option<String> {
     let rest = if let Some(r) = trimmed.strip_prefix("```") {
         r
-    } else if let Some(r) = trimmed.strip_prefix("~~~") {
-        r
     } else {
-        return None;
+        trimmed.strip_prefix("~~~")?
     };
 
     let lang = rest.trim();
