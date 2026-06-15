@@ -63,7 +63,7 @@ fn ansi_fg(color: Color) -> String {
 
 /// Build the ANSI-styled header line for the `fzf` picker, showing keyboard
 /// shortcuts and the current theme name. Used by `--header` / `transform-header`.
-pub fn fzf_header_line(theme: &Theme, zmd_available: bool) -> String {
+pub fn fzf_header_line(theme: &Theme, zmd_available: bool, rg_available: bool) -> String {
     let fg = ansi_fg(theme.fg);
     let accent = ansi_fg(theme.accent);
     let mut header = format!(
@@ -77,6 +77,12 @@ pub fn fzf_header_line(theme: &Theme, zmd_available: bool) -> String {
             header,
             "\n{accent}{ANSI_BOLD}^s{ANSI_NORMAL} {fg}zmd Search  \
              {accent}{ANSI_BOLD}^r{ANSI_NORMAL} {fg}Refs{ANSI_RESET}"
+        );
+    }
+    if rg_available {
+        let _ = write!(
+            header,
+            "\n{accent}{ANSI_BOLD}^g{ANSI_NORMAL} {fg}Content Search{ANSI_RESET}"
         );
     }
     header
@@ -170,7 +176,7 @@ pub fn detect_graphics_protocol() -> GraphicsProtocol {
 /// Print rendered markdown to stdout (non-interactive, no TTY required).
 pub fn print_to_stdout(markdown: &str) {
     let skin = MadSkin::default();
-    let width = terminal::size().map(|(c, _)| usize::from(c)).unwrap_or(80);
+    let width = terminal::size().map_or(80, |(c, _)| usize::from(c));
     let joined = join_paragraphs(markdown);
     let rendered = skin.text(&joined, Some(width));
     print!("{rendered}");
@@ -1123,8 +1129,7 @@ pub fn run(
                         // Determine the current scroll position to find the
                         // first match from the visible area.
                         #[allow(clippy::cast_possible_truncation)]
-                        let scroll_offset =
-                            term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                        let scroll_offset = term.scrollbar().map_or(0, |s| s.offset as usize);
                         let from_row = scroll_offset + 1; // 1-indexed
 
                         if let Some(row) = search.first_match_from(from_row) {
@@ -1148,13 +1153,13 @@ pub fn run(
                     toc_visible = !toc_visible;
                     // Preserve scroll position across toggle.
                     #[allow(clippy::cast_possible_truncation)]
-                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                     goto_line = Some(scroll_pos + 1);
                 }
                 LoopExit::ToggleZen => {
                     zen_mode = !zen_mode;
                     #[allow(clippy::cast_possible_truncation)]
-                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                     goto_line = Some(scroll_pos + 1);
                 }
                 LoopExit::ScrollRight => {
@@ -1166,20 +1171,20 @@ pub fn run(
                 }
                 LoopExit::ShowHelp => {
                     #[allow(clippy::cast_possible_truncation)]
-                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                     draw_help_overlay(&mut stdout, cols, rows, theme)?;
                     goto_line = Some(scroll_pos + 1);
                 }
                 LoopExit::OpenLink => {
                     #[allow(clippy::cast_possible_truncation)]
-                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                     let _ = input::fzf_link_picker(&links);
                     // Always redraw after overlay.
                     goto_line = Some(scroll_pos + 1);
                 }
                 LoopExit::CopyBlock => {
                     #[allow(clippy::cast_possible_truncation)]
-                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                     let _ = input::fzf_code_block_picker(&code_blocks);
                     // Always redraw after overlay.
                     goto_line = Some(scroll_pos + 1);
@@ -1196,8 +1201,7 @@ pub fn run(
                         } else {
                             // Preserve scroll position.
                             #[allow(clippy::cast_possible_truncation)]
-                            let scroll_pos =
-                                term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                            let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                             goto_line = Some(scroll_pos + 1);
                         }
 
@@ -1225,13 +1229,13 @@ pub fn run(
                     } else {
                         // Exiting follow mode: preserve current position.
                         #[allow(clippy::cast_possible_truncation)]
-                        let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                        let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                         goto_line = Some(scroll_pos + 1);
                     }
                 }
                 LoopExit::SetMark(ch) => {
                     #[allow(clippy::cast_possible_truncation)]
-                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                     marks.insert(ch, scroll_pos);
                     // Stay at current position — no need to break the inner loop.
                     goto_line = Some(scroll_pos + 1);
@@ -1242,13 +1246,13 @@ pub fn run(
                     } else {
                         // Mark not set — preserve current position.
                         #[allow(clippy::cast_possible_truncation)]
-                        let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                        let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                         goto_line = Some(scroll_pos + 1);
                     }
                 }
                 LoopExit::ExportHtml => {
                     #[allow(clippy::cast_possible_truncation)]
-                    let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                    let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
 
                     let theme = &theme::ALL_THEMES[theme_index];
                     let output_path = export_html_path(file_path);
@@ -1548,7 +1552,7 @@ fn run_inner_loop<'a>(
 
         // ── Determine viewport scroll offset ─────────────────────
         #[allow(clippy::cast_possible_truncation)]
-        let viewport_top = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+        let viewport_top = term.scrollbar().map_or(0, |s| s.offset as usize);
 
         // Row offset where content begins (after header, or 0 in zen mode).
         let content_y: u16 = u16::from(!zen_mode);

@@ -184,7 +184,7 @@ pub fn poll<'a>(
             // Fuzzy heading navigation (s = sections)
             (KeyCode::Char('s'), KeyModifiers::NONE) => {
                 #[allow(clippy::cast_possible_truncation)]
-                let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                 match fzf_heading_picker(headings)? {
                     Some(line) => return Ok(Action::GotoLine(line)),
                     None => return Ok(Action::Redraw(scroll_pos)),
@@ -194,7 +194,7 @@ pub fn poll<'a>(
             // zmd semantic search (S = search notes) — only when zmd index is available
             (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
                 #[allow(clippy::cast_possible_truncation)]
-                let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                 if let Some(root) = zmd_root {
                     match fzf_zmd_picker(root, true)? {
                         Some(path) => return Ok(Action::ZmdOpen(path)),
@@ -206,7 +206,7 @@ pub fn poll<'a>(
             // Precedent reference picker (r = references) — only when case refs exist
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
                 #[allow(clippy::cast_possible_truncation)]
-                let scroll_pos = term.scrollbar().map(|s| s.offset as usize).unwrap_or(0);
+                let scroll_pos = term.scrollbar().map_or(0, |s| s.offset as usize);
                 if let Some(root) = zmd_root {
                     match fzf_case_ref_picker(case_refs, root)? {
                         Some(path) => return Ok(Action::OpenCaseRef(path)),
@@ -877,8 +877,7 @@ pub fn detect_zmd_root() -> Option<std::path::PathBuf> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
     {
         return None;
     }

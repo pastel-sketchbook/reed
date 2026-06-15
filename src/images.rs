@@ -378,7 +378,7 @@ pub fn emit_kitty_image<W: Write>(w: &mut W, png_data: &[u8], cols: u16, rows: u
             // q=2  — suppress terminal responses
             // C=1  — do NOT move cursor after display
             // c/r  — display size in cells
-            write!(w, "\x1b_Ga=T,f=100,q=2,C=1,c={cols},r={rows},m={more};",)?;
+            write!(w, "\x1b_Ga=T,f=100,q=2,C=1,c={cols},r={rows},m={more};")?;
             first = false;
         } else {
             write!(w, "\x1b_Gm={more};")?;

@@ -125,7 +125,8 @@ fn main() -> Result<()> {
         let prefs = config::load_preferences();
         let theme = &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
         let zmd = input::detect_zmd_root().is_some();
-        print!("{}", viewer::fzf_header_line(theme, zmd));
+        let rg = has_command("rg");
+        print!("{}", viewer::fzf_header_line(theme, zmd, rg));
         return Ok(());
     }
 
@@ -422,6 +423,80 @@ fn extract_json_str<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
+// ── Content search (ripgrep + fzf) ─────────────────────────────
+
+/// Launch an fzf picker powered by `rg` (ripgrep) for searching file contents.
+///
+/// The user types a query and sees live-updating results in the format
+/// `path:line:content`.  On selection the function returns the file path
+/// and line number so the caller can open the file at that line.
+///
+/// Returns `Ok(None)` if the user cancelled (Esc / Ctrl-C).
+fn content_search_pick() -> Result<Option<(PathBuf, usize)>> {
+    let reed_bin = std::env::current_exe().context("cannot determine reed binary path")?;
+
+    let preview_cmd = format!("{} --preview --line {{2}} {{1}}", shell_escape(&reed_bin));
+
+    let mut fzf = Command::new("fzf");
+    fzf.args([
+        "--ansi",
+        "--disabled",
+        "--no-multi",
+        "--prompt",
+        "content> ",
+        "--height",
+        "100%",
+        "--layout",
+        "reverse",
+        "--border",
+        "rounded",
+        "--delimiter",
+        ":",
+        "--nth",
+        "3..",
+        "--preview",
+        &preview_cmd,
+        "--preview-window",
+        "right:64%",
+        "--color",
+        "bg:-1",
+        "--bind",
+        "change:reload:rg --line-number --no-heading --color=always --smart-case {q} || true",
+        "--bind",
+        "start:reload:true",
+        "--border-label",
+        " Content Search ",
+        "--border-label-pos",
+        "-2",
+    ]);
+
+    let output = fzf
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("failed to launch fzf for content search")?
+        .wait_with_output()
+        .context("fzf content search process failed")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let selection = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selection.is_empty() {
+        return Ok(None);
+    }
+
+    // Parse "path:line:content" — splitn(3, ':') yields [path, line, content...].
+    let parts: Vec<&str> = selection.splitn(3, ':').collect();
+    if parts.len() < 2 {
+        return Ok(None);
+    }
+    let path = PathBuf::from(parts[0]);
+    let line: usize = parts[1].parse().unwrap_or(1);
+    Ok(Some((path, line)))
+}
+
 // ── Stdin viewing ───────────────────────────────────────────────
 
 /// Read all of stdin and view the content as markdown or plain text.
@@ -577,8 +652,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
     {
         Some("fd")
     } else if Command::new("fdfind")
@@ -586,8 +660,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
     {
         Some("fdfind")
     } else {
@@ -621,13 +694,28 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
     let zmd_root = input::detect_zmd_root();
     let zmd_available = zmd_root.is_some();
 
+    // Detect ripgrep availability for content search (ctrl-g).
+    let rg_available = has_command("rg");
+
+    // When a file was picked via content search (ctrl-g), store the line
+    // number to pass to viewer::run on the next open.
+    let mut pending_line: Option<usize> = None;
+
+    // Build the set of expected keys so fzf exits instead of consuming them.
+    let expect_keys = match (zmd_available, rg_available) {
+        (true, true) => "ctrl-s,ctrl-r,ctrl-g",
+        (true, false) => "ctrl-s,ctrl-r",
+        (false, true) => "ctrl-g",
+        (false, false) => "",
+    };
+
     loop {
         // Build the initial header from current preferences (may have changed
         // via theme cycling in the previous iteration).
         let prefs = config::load_preferences();
         let initial_theme =
             &theme::ALL_THEMES[theme::theme_index_by_name(config::active_theme(&prefs))];
-        let initial_header = viewer::fzf_header_line(initial_theme, zmd_available);
+        let initial_header = viewer::fzf_header_line(initial_theme, zmd_available, rg_available);
         let initial_label = viewer::fzf_border_label(initial_theme);
 
         let mut fzf = Command::new("fzf");
@@ -669,10 +757,9 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             fzf.stdin(std::process::Stdio::piped());
         }
 
-        // When zmd is available, register ctrl-s and ctrl-r as expected keys
-        // so fzf exits and reed can take over the terminal for overlays.
-        if zmd_available {
-            fzf.arg("--expect").arg("ctrl-s,ctrl-r");
+        // Register expected keys so fzf exits and reed handles them.
+        if !expect_keys.is_empty() {
+            fzf.arg("--expect").arg(expect_keys);
         }
 
         // fzf needs the real TTY for its UI, and writes the selection to stdout.
@@ -706,13 +793,13 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
         //   line 1: the key pressed (empty if enter, "ctrl-s" if ctrl-s)
         //   line 2: the selected item
         // Without --expect, it's a single line with the selection.
-        let (pressed_key, selected) = if zmd_available {
+        let (pressed_key, selected) = if expect_keys.is_empty() {
+            (String::new(), raw_output.trim().to_string())
+        } else {
             let mut lines = raw_output.lines();
             let key = lines.next().unwrap_or("").trim();
             let sel = lines.next().unwrap_or("").trim().to_string();
             (key.to_string(), sel)
-        } else {
-            (String::new(), raw_output.trim().to_string())
         };
 
         // ctrl-s: launch zmd search picker, then open the result.
@@ -754,6 +841,23 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
             } else {
                 continue; // Could not read file.
             }
+        } else if pressed_key == "ctrl-g" {
+            // Content search: launch ripgrep-powered fzf picker.
+            match content_search_pick() {
+                Ok(Some((path, line))) => {
+                    if buffer_ring.last() != Some(&path) {
+                        buffer_ring.push(path);
+                    }
+                    buffer_index = buffer_ring.len() - 1;
+                    pending_line = Some(line);
+                    // Fall through to the inner buffer-ring loop below.
+                }
+                Ok(None) => continue, // User cancelled — return to fzf.
+                Err(e) => {
+                    tracing::warn!("content search error: {e}");
+                    continue;
+                }
+            }
         } else if selected.is_empty() {
             print!("\x1b[0m\r");
             return Ok(());
@@ -793,7 +897,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                     theme,
                     &filename,
                     &base_dir,
-                    None,
+                    pending_line.take(),
                     None,
                     Some(cur_file.as_path()),
                     buf_info,
@@ -874,7 +978,7 @@ fn fzf_pick_and_view(theme: Option<&str>, max_scrollback: usize) -> Result<()> {
                 theme,
                 &filename,
                 &base_dir,
-                None,
+                pending_line.take(),
                 code_lang.as_deref(),
                 Some(cur_file.as_path()),
                 buf_info,
@@ -911,8 +1015,7 @@ fn has_command(cmd: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Detect the preferred code editor.

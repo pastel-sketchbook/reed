@@ -36,6 +36,8 @@ entirely and use syntect for direct syntax highlighting.
   exactly the same without it
 - **Vendor filter** -- toggle vendor/generated directories (`node_modules`,
   `target`, `.git`, etc.) in the fzf picker with `Ctrl-v` (requires `fd`)
+- **Content search** -- press `Ctrl-g` in the fzf picker to search file contents
+  via ripgrep with live-updating results; opens the file at the matching line
 - **Scrollback navigation** -- PgUp/PgDn, Home/End, arrow keys, `j`/`k`,
   horizontal scroll with Left/Right or `H`/`L`, mouse wheel support
 - **Search** -- `/` to search with smart-case; regex auto-detected from
@@ -124,6 +126,7 @@ reed --line 42 <file>    # start at line 42
 | `Ctrl-b` | Previous theme |
 | `Ctrl-v` | Toggle vendor file filter (requires `fd`) |
 | `Ctrl-s` | zmd search overlay (if available) |
+| `Ctrl-g` | Content search via ripgrep (requires `rg`) |
 
 ## Themes
 
@@ -150,7 +153,7 @@ src/
 
 ```sh
 cargo build      # compile (requires Zig 0.15.x)
-cargo test       # run 143 unit tests
+cargo test       # run 159 unit tests
 cargo clippy     # lint
 cargo fmt        # format
 ```
