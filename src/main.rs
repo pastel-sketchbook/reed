@@ -1021,13 +1021,14 @@ fn has_command(cmd: &str) -> bool {
 /// Detect the preferred code editor.
 ///
 /// Resolution order:
-/// 1. `emacs` if available.
-/// 2. `nvim` if available.
-/// 3. `$EDITOR` environment variable (if set and available on `$PATH`).
+/// 1. `nvim` if available.
+/// 2. `emacs` if available.
+/// 3. `vim` if available.
+/// 4. `$EDITOR` environment variable (if set and available on `$PATH`).
 ///
 /// Returns `None` when no suitable editor is found.
 fn detect_editor() -> Option<String> {
-    for candidate in &["emacs", "nvim"] {
+    for candidate in &["nvim", "emacs", "vim"] {
         if has_command(candidate) {
             return Some((*candidate).to_string());
         }
